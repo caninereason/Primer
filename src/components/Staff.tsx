@@ -99,7 +99,7 @@ export function Staff({
         const sn = new StaveNote({
           keys: vexNotes.map(n => n.key),
           duration: 'w',
-          auto_stem: true,
+          autoStem: true,
         });
 
         vexNotes.forEach((n, i) => {
@@ -107,7 +107,7 @@ export function Staff({
           if (noteColors?.[i]) sn.setKeyStyle(i, { fillStyle: noteColors[i]! });
         });
 
-        const voice = new Voice({ num_beats: 4, beat_value: 4 });
+        const voice = new Voice({ numBeats: 4, beatValue: 4 });
         voice.setStrict(false);
         voice.addTickables([sn]);
 
@@ -120,14 +120,14 @@ export function Staff({
           const note = new StaveNote({
             keys: [vex.key],
             duration: 'q',
-            auto_stem: true,
+            autoStem: true,
           });
           if (vex.accidental) note.addModifier(new Accidental(vex.accidental));
           if (noteColors?.[idx]) note.setKeyStyle(0, { fillStyle: noteColors[idx]! });
           return note;
         });
 
-        const voice = new Voice({ num_beats: notes.length, beat_value: 4 });
+        const voice = new Voice({ numBeats: notes.length, beatValue: 4 });
         voice.setStrict(false);
         voice.addTickables(staveNotes);
 

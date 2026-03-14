@@ -67,7 +67,7 @@ export default defineConfig({
                   customChords[symbol] = [];
                 }
                 const arr = customChords[symbol];
-                while (arr.length <= positionIdx) arr.push(null);
+                while (arr.length <= positionIdx) arr.push([null, null, null, null, null, null]);
                 arr[positionIdx] = normalizedTab;
                 fs.writeFileSync(filePath, JSON.stringify(customChords, null, 2));
                 res.setHeader('Content-Type', 'application/json');

@@ -1,4 +1,4 @@
-import type { Song } from './types/music';
+import type { Song } from '../types/music';
 
 export const Ol55: Song[] = [
   {
