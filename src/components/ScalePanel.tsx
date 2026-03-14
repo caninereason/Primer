@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { Note } from 'tonal';
 import type { ScaleSuggestion, KeyAnalysis } from '../types/music';
 
@@ -32,8 +33,29 @@ export function ScalePanel({
   prevChordSymbol,
   nextChordSymbol,
 }: ScalePanelProps) {
+  const [expanded, setExpanded] = useState(true);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)');
+    if (mq.matches) setExpanded(false);
+    const handler = () => { if (mq.matches) setExpanded(false); };
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+
   return (
-    <aside className="scale-panel">
+    <aside className={`scale-panel ${expanded ? 'scale-panel--expanded' : 'scale-panel--collapsed'}`}>
+      <button
+        type="button"
+        className="scale-panel-toggle"
+        onClick={() => setExpanded((e) => !e)}
+        title={expanded ? 'Collapse scale suggestions' : 'Expand scale suggestions'}
+        aria-expanded={expanded}
+      >
+        <span className="scale-panel-toggle-label">Scales</span>
+        <span className="scale-panel-toggle-icon" aria-hidden>{expanded ? '›' : '‹'}</span>
+      </button>
+      <div className="scale-panel-inner">
       <div className="key-analysis">
         <h3 className="panel-heading">Key</h3>
         <div className="key-result">
@@ -127,6 +149,7 @@ export function ScalePanel({
           <p>Select a chord from the chart to see scale suggestions</p>
         </div>
       )}
+      </div>
     </aside>
   );
 }
