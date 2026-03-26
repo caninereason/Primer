@@ -5,7 +5,6 @@ interface HeaderProps {
   selectedSongIndex: number;
   onSongSelect: (index: number) => void;
   onImportClick: () => void;
-  onDemoLoad: () => void;
   onLibraryClick: () => void;
   activeDegrees: Set<number>;
   onToggleDegree: (degree: number) => void;
@@ -32,7 +31,6 @@ export function Header({
   selectedSongIndex,
   onSongSelect,
   onImportClick,
-  onDemoLoad,
   onLibraryClick,
   activeDegrees,
   onToggleDegree,
@@ -89,11 +87,8 @@ export function Header({
         <button className="btn btn-ghost" onClick={onLibraryClick}>
           Scale/Chord Library
         </button>
-        <button className="btn btn-ghost" onClick={onDemoLoad}>
-          Demo Songs
-        </button>
         <button className="btn btn-primary" onClick={onImportClick}>
-          Import
+          Import iReal
         </button>
       </div>
     </header>

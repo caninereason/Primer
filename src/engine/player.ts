@@ -1,6 +1,7 @@
 import { Note, Chord } from 'tonal';
 import { computeVoicing, type VoicingType } from './voicingEngine';
 import type { Measure, ChordInfo } from '../types/music';
+import { generateWalkingBassBar } from './walk';
 
 interface BeatEvent {
   measureIdx: number;
@@ -8,6 +9,7 @@ interface BeatEvent {
   chordChange: boolean;
   accent: boolean;
   midiNotes: number[];
+  bassMidi: number;
 }
 
 function chordToMidi(chord: ChordInfo, voicingType: VoicingType): number[] {
@@ -69,6 +71,19 @@ function buildTimeline(
 
       const chord = hasChords ? m.chords[ci] : null;
       const isChange = chord != null;
+      const nextChord = (() => {
+        if (!isChange) return null;
+        for (let m2 = mi; m2 < measures.length; m2++) {
+          const startCi = m2 === mi ? ci + 1 : 0;
+          for (let c2 = startCi; c2 < measures[m2].chords.length; c2++) {
+            return measures[m2].chords[c2];
+          }
+        }
+        return null;
+      })();
+      const bassBar = chord
+        ? generateWalkingBassBar(chord, nextChord, chordBeats, mi + ci)
+        : Array.from({ length: chordBeats }, () => 36);
 
       if (isChange) {
         lastNotes = chordToMidi(chord, voicingType);
@@ -83,6 +98,7 @@ function buildTimeline(
           chordChange: b === 0 && isChange,
           accent: beatInMeasure === 0,
           midiNotes: lastNotes,
+          bassMidi: bassBar[b] ?? bassBar[bassBar.length - 1] ?? 36,
         });
         beatInMeasure++;
       }
@@ -93,6 +109,7 @@ function buildTimeline(
 }
 
 export type PlayerCallback = (measureIdx: number, chordIdx: number) => void;
+export type BassBeatCallback = (bassMidi: number) => void;
 
 export type RepeatMark = { measureIdx: number; chordIdx: number };
 
@@ -106,19 +123,25 @@ export class ChordPlayer {
   private activeOscs: OscillatorNode[] = [];
   private activeGains: GainNode[] = [];
   private onBeat: PlayerCallback | null = null;
+  private onBassBeat: BassBeatCallback | null = null;
   private onDone: (() => void) | null = null;
   private lastMeasures: Measure[] = [];
   private lastTimeSig = '4/4';
   loop = true;
   metronomeOn = true;
+  pianoOn = true;
+  bassOn = true;
+  private bassVolume = 0.75;
+  private swingPercent = 50;
   private repeatFrom: RepeatMark | null = null;
   private repeatTo: RepeatMark | null = null;
   private repeatStartBeat = 0;
   private repeatEndBeat = -1;
 
-  setCallbacks(onBeat: PlayerCallback, onDone: () => void) {
+  setCallbacks(onBeat: PlayerCallback, onDone: () => void, onBassBeat?: BassBeatCallback) {
     this.onBeat = onBeat;
     this.onDone = onDone;
+    this.onBassBeat = onBassBeat ?? null;
   }
 
   load(measures: Measure[], bpm: number, timeSig: string, voicingType: VoicingType = 'all') {
@@ -209,6 +232,23 @@ export class ChordPlayer {
     this.bpm = Math.max(30, Math.min(300, bpm));
   }
 
+  setPianoOn(on: boolean) {
+    this.pianoOn = on;
+    if (!on) this.releaseChord();
+  }
+
+  setBassOn(on: boolean) {
+    this.bassOn = on;
+  }
+
+  setBassVolume(volume: number) {
+    this.bassVolume = Math.max(0, Math.min(1, volume));
+  }
+
+  setSwingPercent(percent: number) {
+    this.swingPercent = Math.max(50, Math.min(75, percent));
+  }
+
   private tick() {
     if (!this._playing || !this.ctx) return;
 
@@ -231,15 +271,24 @@ export class ChordPlayer {
     const now = this.ctx.currentTime;
 
     if (this.metronomeOn) this.playClick(now, ev.accent);
+    if (this.bassOn) this.playBass(now, ev.bassMidi);
+    this.onBassBeat?.(ev.bassMidi);
 
-    if (ev.chordChange) {
+    if (ev.chordChange && this.pianoOn) {
       this.releaseChord();
       this.playChord(ev.midiNotes, now);
       this.onBeat?.(ev.measureIdx, ev.chordIdx);
+    } else if (ev.chordChange) {
+      this.onBeat?.(ev.measureIdx, ev.chordIdx);
     }
 
+    const currentBeat = this.beat;
     this.beat++;
-    const ms = (60 / this.bpm) * 1000;
+    const baseMs = (60 / this.bpm) * 1000;
+    const swingRatio = this.swingPercent / 100;
+    const ms = currentBeat % 2 === 0
+      ? baseMs * 2 * swingRatio
+      : baseMs * 2 * (1 - swingRatio);
     this.timerId = setTimeout(() => this.tick(), ms);
   }
 
@@ -285,6 +334,41 @@ export class ChordPlayer {
         this.activeGains.push(g);
       }
     }
+  }
+
+  private playBass(time: number, midi: number) {
+    if (!this.ctx) return;
+    const freq = 440 * Math.pow(2, (midi - 69) / 12);
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 900;
+    filter.Q.value = 0.7;
+
+    const g = this.ctx.createGain();
+    const mainVol = 0.2 * this.bassVolume;
+    g.gain.setValueAtTime(0, time);
+    g.gain.linearRampToValueAtTime(mainVol, time + 0.015);
+    g.gain.exponentialRampToValueAtTime(mainVol * 0.7, time + 0.2);
+    g.gain.exponentialRampToValueAtTime(0.001, time + 0.42);
+
+    const osc1 = this.ctx.createOscillator();
+    osc1.type = 'triangle';
+    osc1.frequency.value = freq;
+    const osc2 = this.ctx.createOscillator();
+    osc2.type = 'sine';
+    osc2.frequency.value = freq * 2;
+
+    const g2 = this.ctx.createGain();
+    g2.gain.value = 0.26;
+
+    osc1.connect(filter);
+    osc2.connect(g2).connect(filter);
+    filter.connect(g).connect(this.ctx.destination);
+
+    osc1.start(time);
+    osc2.start(time);
+    osc1.stop(time + 0.48);
+    osc2.stop(time + 0.48);
   }
 
   private releaseChord() {

@@ -22,6 +22,12 @@ interface ChordChartProps {
   onLoopToggle?: () => void;
   isMetronomeOn?: boolean;
   onMetronomeToggle?: () => void;
+  isPianoOn?: boolean;
+  onPianoToggle?: () => void;
+  isBassOn?: boolean;
+  onBassToggle?: () => void;
+  swingPercent?: number;
+  onSwingChange?: (percent: number) => void;
   onBpmChange?: (delta: number) => void;
   onBpmSet?: (bpm: number) => void;
   onBpmReset?: () => void;
@@ -124,6 +130,12 @@ export function ChordChart({
   onLoopToggle,
   isMetronomeOn = true,
   onMetronomeToggle,
+  isPianoOn = true,
+  onPianoToggle,
+  isBassOn = true,
+  onBassToggle,
+  swingPercent = 50,
+  onSwingChange,
   onBpmChange,
   onBpmSet,
   onBpmReset,
@@ -247,6 +259,42 @@ export function ChordChart({
                   >
                     ♩
                   </button>
+                )}
+                {onPianoToggle && (
+                  <button
+                    className={`transport-btn piano ${isPianoOn ? 'active' : ''}`}
+                    onClick={onPianoToggle}
+                    title={isPianoOn ? 'Piano on' : 'Piano off'}
+                  >
+                    P
+                  </button>
+                )}
+                {onBassToggle && (
+                  <button
+                    className={`transport-btn bass ${isBassOn ? 'active' : ''}`}
+                    onClick={onBassToggle}
+                    title={isBassOn ? 'Bass on' : 'Bass off'}
+                  >
+                    B
+                  </button>
+                )}
+                {onSwingChange && (
+                  <label
+                    title={`Swing: ${swingPercent}%`}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', marginLeft: '6px' }}
+                  >
+                    <span style={{ fontSize: '11px', opacity: 0.9 }}>Swing</span>
+                    <input
+                      type="range"
+                      min={50}
+                      max={75}
+                      step={1}
+                      value={swingPercent}
+                      onChange={(e) => onSwingChange(parseInt(e.target.value, 10))}
+                      style={{ width: '84px' }}
+                      aria-label="Swing percent"
+                    />
+                  </label>
                 )}
               </div>
             )}
