@@ -39,6 +39,12 @@ body,
   width: 100%;
 }
 
+/* At 100% browser zoom the UI reads oversized on typical desktops; scale the app shell
+   (≈15% smaller) so density matches what many people get by zooming out. */
+#root {
+  zoom: 0.85;
+}
+
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: var(--bg-primary);

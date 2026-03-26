@@ -13,8 +13,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 56px;
-  padding: 0 20px;
+  height: 48px;
+  padding: 0 14px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -28,7 +28,7 @@
 }
 
 .app-title {
-  font-size: 20px;
+  font-size: 17px;
   font-weight: 700;
   background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
   -webkit-background-clip: text;
@@ -37,7 +37,7 @@
 }
 
 .app-subtitle {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-dim);
   font-weight: 400;
 }
@@ -50,14 +50,15 @@
 }
 
 .song-selector {
-  padding: 6px 12px;
+  padding: 5px 10px;
   border: 1px solid var(--border-light);
   border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 13px;
-  min-width: 260px;
+  font-size: 12px;
+  min-width: 200px;
+  max-width: min(360px, 42vw);
   cursor: pointer;
   outline: none;
 }
@@ -146,28 +147,28 @@
 .main-content {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
 /* ── Instrument Bar ── */
 
 .instrument-bar {
   display: flex;
-  gap: 12px;
+  gap: 10px;
 }
 
 .instrument-card {
-  --instrument-ctl-h: 28px;
-  --instrument-ctl-radius: 6px;
+  --instrument-ctl-h: 26px;
+  --instrument-ctl-radius: 5px;
   container-type: inline-size;
   container-name: inst;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 10px;
+  padding: 8px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -191,9 +192,9 @@
 }
 
 .instrument-panel-expand {
-  width: 26px;
-  height: 26px;
-  font-size: 11px;
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
   flex-shrink: 0;
 }
 
@@ -293,8 +294,8 @@
   flex-wrap: nowrap;
   min-width: 0;
   /* Scale all header controls to card width (no scrollbars) */
-  --instrument-ctl-h: clamp(20px, 5cqi + 12px, 28px);
-  --instrument-ctl-radius: clamp(3px, 0.85cqi, 6px);
+  --instrument-ctl-h: clamp(18px, 5cqi + 10px, 26px);
+  --instrument-ctl-radius: clamp(3px, 0.85cqi, 5px);
 }
 
 .instrument-label {
@@ -738,7 +739,7 @@
 .fretboard-container svg {
   width: 100%;
   height: auto;
-  max-height: 120px;
+  max-height: 108px;
 }
 
 /* ── Staff (standalone fallback) ── */
@@ -774,11 +775,11 @@
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 20px;
+  padding: 14px;
 }
 
 .chart-header {
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .chart-header-top {
@@ -851,8 +852,8 @@
 }
 
 .transport-btn {
-  font-size: 13px;
-  padding: 3px 8px;
+  font-size: 12px;
+  padding: 2px 7px;
   border-radius: 4px;
   border: 1px solid var(--border);
   background: transparent;
@@ -952,17 +953,17 @@
 }
 
 .chart-title {
-  font-size: 22px;
+  font-size: 17px;
   font-weight: 700;
   color: var(--text-primary);
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 .chart-meta {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -973,7 +974,7 @@
 
 .key-select {
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--accent-primary);
   background: transparent;
@@ -1042,10 +1043,10 @@
 }
 
 .tempo-input {
-  width: 44px;
+  width: 40px;
   margin: 0 2px;
   padding: 2px 4px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
   background: var(--bg-primary);
@@ -1112,12 +1113,12 @@
 
 .chart-cell {
   min-width: 0;
-  padding: 14px 12px;
+  padding: 10px 8px;
   text-align: center;
   cursor: pointer;
   transition: all var(--transition);
   position: relative;
-  min-height: 52px;
+  min-height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1170,16 +1171,16 @@
 
 .cell-chords {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
-  letter-spacing: 0.5px;
+  letter-spacing: 0.4px;
 }
 
 .cell-function {
   display: block;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 400;
   color: var(--accent-primary);
   opacity: 0.75;
