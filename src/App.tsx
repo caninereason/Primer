@@ -392,7 +392,7 @@ export default function App() {
         return {
           label: `Pos ${i + 1}`,
           startFret: Math.max(0, minF - 1),
-          endFret: maxF + 2,
+          endFret: Math.min(maxF + 2, 12),
         };
       });
     }
@@ -405,7 +405,7 @@ export default function App() {
     }
     if (guitarPosition >= 0 && guitarPositions[guitarPosition])
       return guitarPositions[guitarPosition];
-    return { startFret: 0, endFret: 14, label: 'All' };
+    return { startFret: 0, endFret: 12, label: 'All' };
   }, [guitarPosition, guitarPositions, fretboardInstrument, bassPosition]);
 
   const bassOctaveOffLabelAnchors = useMemo(() => {

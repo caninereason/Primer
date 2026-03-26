@@ -107,7 +107,10 @@ function rootChromaFromKey(root: string): number | null {
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
-const TUNING = [4, 9, 2, 7, 11, 4]; // E A D G B e
+const TUNING = [4, 9, 2, 7, 11, 4]; // E A D G B e (low E → high e)
+
+/** Pressed frets stay at or below this when building / transposing shapes. */
+const MAX_CHORD_FRET = 12;
 
 function intervalToSemitones(iv: string): number | null {
   const map: Record<string, number> = {
@@ -185,6 +188,59 @@ function transposeTab(tab: GuitarTab, delta: number): GuitarTab {
   });
 }
 
+/**
+ * Transpose a C-root template toward `targetChordChromas` (same shape class as C, new root).
+ * Keeps a string open only if that open pitch class is still a chord tone.
+ * Rejects shapes that would need a pressed fret above MAX_CHORD_FRET or fewer than 3 strings.
+ */
+function transposeTemplateTab(
+  tab: GuitarTab,
+  delta: number,
+  targetChordChromas: Set<number>,
+): GuitarTab | null {
+  const next: GuitarTab = tab.map((f, s) => {
+    if (f == null) return null;
+    if (f === 0) {
+      return targetChordChromas.has(TUNING[s] % 12) ? 0 : null;
+    }
+    const v = f + delta;
+    if (v < 0) return null;
+    if (v > MAX_CHORD_FRET) return null;
+    return v;
+  });
+  return validateShape(next);
+}
+
+function validateShape(tab: GuitarTab): GuitarTab | null {
+  const sounding = tab.filter(f => f != null);
+  if (sounding.length < 3) return null;
+  const pressed = tab.filter((f): f is number => f != null && f > 0);
+  if (pressed.length > 0 && Math.max(...pressed) > MAX_CHORD_FRET) return null;
+  return tab;
+}
+
+/** For ordering: Pos 1 = closest to nut (lowest min pressed fret), then more open strings, then lower stretch. */
+function shapeNeckSortKey(tab: GuitarTab): { minP: number; maxP: number; opens: number; sumP: number } {
+  const pressed = tab.filter((f): f is number => f != null && f > 0);
+  const opens = tab.filter(f => f === 0).length;
+  if (pressed.length === 0) return { minP: 999, maxP: 0, opens, sumP: 0 };
+  const minP = Math.min(...pressed);
+  const maxP = Math.max(...pressed);
+  const sumP = pressed.reduce((a, b) => a + b, 0);
+  return { minP, maxP, opens, sumP };
+}
+
+function sortChordPositionsNearestNutFirst(tabs: GuitarTab[]): void {
+  tabs.sort((a, b) => {
+    const sa = shapeNeckSortKey(a);
+    const sb = shapeNeckSortKey(b);
+    if (sa.minP !== sb.minP) return sa.minP - sb.minP;
+    if (sa.opens !== sb.opens) return sb.opens - sa.opens;
+    if (sa.maxP !== sb.maxP) return sa.maxP - sb.maxP;
+    return sa.sumP - sb.sumP;
+  });
+}
+
 /* ── CAGED shape builder ──────────────────────────────────────── */
 
 /**
@@ -204,6 +260,8 @@ function buildOneShape(
   rootFret: number,
   direction: 'left' | 'right',
 ): GuitarTab | null {
+  if (rootFret > MAX_CHORD_FRET) return null;
+
   const tab: GuitarTab = new Array(6).fill(null);
   tab[bassStr] = rootFret;
 
@@ -222,7 +280,13 @@ function buildOneShape(
         } else if (chordChromas.has(rootChr)) {
           tab[5] = rootFret;
         } else {
-          tab[5] = findClosest(s, chordChromas, Math.max(0, rootFret - 5), rootFret - 1, rootFret);
+          tab[5] = findClosest(
+            s,
+            chordChromas,
+            Math.max(0, rootFret - 5),
+            Math.min(rootFret - 1, MAX_CHORD_FRET),
+            rootFret,
+          );
         }
         continue;
       }
@@ -233,11 +297,23 @@ function buildOneShape(
         continue;
       }
 
-      tab[s] = findClosest(s, chordChromas, Math.max(0, rootFret - 5), rootFret - 1, rootFret);
+      tab[s] = findClosest(
+        s,
+        chordChromas,
+        Math.max(0, rootFret - 5),
+        Math.min(rootFret - 1, MAX_CHORD_FRET),
+        rootFret,
+      );
 
     } else {
       // RIGHT: search at or above rootFret
-      tab[s] = findClosest(s, chordChromas, rootFret, rootFret + 5, rootFret);
+      tab[s] = findClosest(
+        s,
+        chordChromas,
+        rootFret,
+        Math.min(rootFret + 5, MAX_CHORD_FRET),
+        rootFret,
+      );
     }
   }
 
@@ -356,7 +432,8 @@ function ensureAllTones(tab: GuitarTab, bassStr: number, chordChromas: Set<numbe
 /** Find fret on string `s` that gives chroma `targetChr` within [lo, hi]. */
 function findClosestForChroma(s: number, targetChr: number, lo: number, hi: number): number | null {
   const open = TUNING[s];
-  for (let f = Math.max(0, lo); f <= hi; f++) {
+  const hiC = Math.min(hi, MAX_CHORD_FRET);
+  for (let f = Math.max(0, lo); f <= hiC; f++) {
     if ((open + f) % 12 === targetChr) return f;
   }
   return null;
@@ -374,7 +451,8 @@ function findClosest(
   let best = -1;
   let bestDist = Infinity;
 
-  for (let f = Math.max(0, lo); f <= hi; f++) {
+  const hiC = Math.min(hi, MAX_CHORD_FRET);
+  for (let f = Math.max(0, lo); f <= hiC; f++) {
     const chr = (open + f) % 12;
     if (chordChromas.has(chr)) {
       const d = Math.abs(f - anchor);
@@ -485,13 +563,27 @@ export function lookupChordShapes(
       const baseChroma = rootChromaFromKey(baseRoot);
       if (baseChroma != null) {
         const delta = (rootChroma - baseChroma + 12) % 12;
-        const transposedTemplate = combinedTemplate.map(tab => tab ? transposeTab(tab, delta) : null);
+        const targetChromas = new Set<number>();
+        if (intervals && intervals.length > 0) {
+          for (const i of intervals) targetChromas.add((rootChroma + i) % 12);
+        } else {
+          for (const n of getChordNotes(`${root}${rawSuffix}`)) {
+            const c = Note.chroma(n);
+            if (c != null) targetChromas.add(c);
+          }
+        }
+        const transposedTemplate =
+          targetChromas.size > 0
+            ? combinedTemplate.map(tab =>
+                tab ? transposeTemplateTab(tab, delta, targetChromas) : null,
+              )
+            : combinedTemplate.map(tab => (tab ? transposeTab(tab, delta) : null));
 
-        // Merge with existing baseTabs (prefer template if it exists for that position)
+        // Merge by index so Pos N matches the C template slot N (same CAGED family).
         const mergeLen = Math.max(baseTabs.length, transposedTemplate.length);
-        const merged: GuitarTab[] = [];
+        const merged: (GuitarTab | null)[] = [];
         for (let i = 0; i < mergeLen; i++) {
-          merged[i] = transposedTemplate[i] || baseTabs[i] || null as any;
+          merged[i] = transposedTemplate[i] ?? baseTabs[i] ?? null;
         }
         baseTabs = merged;
       }
@@ -543,15 +635,8 @@ export function lookupChordShapes(
     finalBaseTabs[i] = tabToUse as GuitarTab;
   }
 
-  // 6) Final Sort: Ensure "Pos 1" is always the lowest fretboard position.
-  // We sort the tabs by their minimum pressed fret (ignoring open strings).
-  finalBaseTabs.sort((a, b) => {
-    const fretsA = a.filter((f): f is number => f != null && f > 0);
-    const fretsB = b.filter((f): f is number => f != null && f > 0);
-    const minA = fretsA.length ? Math.min(...fretsA) : 0;
-    const minB = fretsB.length ? Math.min(...fretsB) : 0;
-    return minA - minB;
-  });
+  // 6) Pos 1 = lowest on neck (nearest open position); remaining slots ascend by min fret / openness / span.
+  sortChordPositionsNearestNutFirst(finalBaseTabs);
 
   return { tabs: finalBaseTabs, shapeLabels: null };
 }
@@ -562,13 +647,14 @@ function fallbackBarreShape(rootChroma: number, intervals: number[], index: numb
   const bassStrings = [0, 1, 0, 1, 2]; // E, A, E(+12), A(+12), D for 5 distinct positions
   const bassStr = bassStrings[index % 5];
   let rootFret = (rootChroma - TUNING[bassStr] + 12) % 12;
-  if (index >= 2) rootFret += 12;
-  if (rootFret > 16) return null;
+  if (index >= 2 && rootFret + 12 <= MAX_CHORD_FRET) rootFret += 12;
+  if (rootFret > MAX_CHORD_FRET) return null;
   const tab: GuitarTab = new Array(6).fill(null);
   tab[bassStr] = rootFret;
   for (let s = bassStr + 1; s < 6; s++) {
     const open = TUNING[s];
-    for (let f = rootFret; f <= rootFret + 4; f++) {
+    const hi = Math.min(rootFret + 4, MAX_CHORD_FRET);
+    for (let f = rootFret; f <= hi; f++) {
       if (chordChromas.has((open + f) % 12)) {
         tab[s] = f;
         break;

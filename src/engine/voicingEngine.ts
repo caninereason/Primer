@@ -170,9 +170,10 @@ export function computeGuitarPositions(rootChroma: number): GuitarPosition[] {
   // Sort by center fret so positions ascend the neck identically to chords
   defs.sort((a, b) => a.center - b.center);
 
+  const maxFret = 12;
   return defs.map((d, i) => ({
     label: `Pos ${i + 1}`,
     startFret: Math.max(0, d.start - 1),
-    endFret: d.start + 4,
+    endFret: Math.min(d.start + 4, maxFret),
   }));
 }
