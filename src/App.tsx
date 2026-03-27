@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
 import { Note, Chord, Scale } from 'tonal';
 import type { Song, Measure, ChordInfo, ScaleSuggestion, KeyAnalysis } from './types/music';
 import { getScalesForChord } from './engine/scaleEngine';
@@ -28,6 +28,8 @@ import './App.css';
 
 import { transposeNote, FLAT_KEYS, FLAT_NOTES, SHARP_NOTES } from './engine/noteUtils';
 import { getChordNotes, lookupChordShapes, CANONICAL_SUFFIX_MAP, detectLibraryChords } from './engine/chordDatabase';
+import { generateWalkingBassBar } from './engine/walk';
+import { chordBeatsForSlot, findNextChordInfo } from './engine/bassFretboard';
 
 type InstrumentId = 'staff' | 'piano' | 'guitar';
 type FretboardInstrument = 'guitar' | 'bass';
@@ -157,6 +159,13 @@ export default function App() {
   /** Skip one chordScales sync so panel scale choice is not replaced by chordScales[0]. */
   const skipPanelScaleSyncRef = useRef(false);
 
+  const fretboardHeaderActionsRef = useRef<HTMLDivElement | null>(null);
+  const fretboardCompactEnterWidthRef = useRef(0);
+  const prevFretboardInstrumentRef = useRef<FretboardInstrument | null>(null);
+  const posNavMenuWrapRef = useRef<HTMLDivElement | null>(null);
+  const [fretboardPosCompact, setFretboardPosCompact] = useState(false);
+  const [fretboardPosMenuOpen, setFretboardPosMenuOpen] = useState(false);
+
   const playerRef = useRef<ChordPlayer | null>(null);
   if (!playerRef.current) playerRef.current = new ChordPlayer();
 
@@ -272,6 +281,28 @@ export default function App() {
     });
     return normalizeNotes([...chordGhosts, ...scaleGhosts]).map(toPitchClass);
   }, [fretboardInstrument, selectedChord, selectedScale, bassDisplayNote, displayRoot]);
+
+  /** Walking-bass MIDI targets for current chord slot (matches player). Used for bass chord-mode ghosts. */
+  const bassChordGhostMidis = useMemo((): readonly number[] | null => {
+    if (fretboardInstrument !== 'bass' || !activeSong || !selectedChord || selectedScale) {
+      return null;
+    }
+    const mi = selectedMeasure ?? 0;
+    const m = activeSong.measures[mi];
+    if (!m) return null;
+    const bpb = parseInt(activeSong.timeSignature.split('/')[0], 10) || 4;
+    const beats = chordBeatsForSlot(m, selectedChordIdx, bpb);
+    const nextChord = findNextChordInfo(activeSong.measures, mi, selectedChordIdx);
+    const bar = generateWalkingBassBar(selectedChord, nextChord, beats, mi + selectedChordIdx);
+    return [...new Set(bar)];
+  }, [
+    fretboardInstrument,
+    activeSong,
+    selectedChord,
+    selectedScale,
+    selectedMeasure,
+    selectedChordIdx,
+  ]);
 
   const voicing = useMemo(() => {
     if (!selectedChord || selectedScale || voicingType === 'all') return null;
@@ -415,10 +446,18 @@ export default function App() {
     const chromas = new Set<number>();
     if (rootCh != null) chromas.add(rootCh);
     if (showBassAllNoteNames) {
-      bassGhostNotes.forEach((n) => {
-        const c = Note.chroma(n);
-        if (c != null) chromas.add(c);
-      });
+      if (selectedScale) {
+        bassGhostNotes.forEach((n) => {
+          const c = Note.chroma(n);
+          if (c != null) chromas.add(c);
+        });
+      } else if (bassChordGhostMidis) {
+        bassChordGhostMidis.forEach((midi) => {
+          const n = Note.fromMidi(midi);
+          const c = n ? Note.chroma(n) : null;
+          if (c != null) chromas.add(c);
+        });
+      }
       const hl = Note.chroma(bassDisplayNote || displayRoot);
       if (hl != null) chromas.add(hl);
     }
@@ -433,6 +472,8 @@ export default function App() {
     displayRoot,
     showBassAllNoteNames,
     bassGhostNotes,
+    bassChordGhostMidis,
+    selectedScale,
     bassDisplayNote,
     fretRange.startFret,
     fretRange.endFret,
@@ -758,7 +799,7 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
       (bassMidi) => {
         const note = Note.fromMidi(bassMidi);
         setLiveBassMidi(bassMidi);
-        setLiveBassNote(note ? toPitchClass(note) : null);
+        setLiveBassNote(note ?? null);
       },
     );
   }, []);
@@ -1102,10 +1143,115 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
 
   const guitarOptionIdx = guitarOptionLabels.findIndex(o => o.value === guitarPosition);
 
-  const renderGuitar = (expanded: boolean) => (
-    <div className={`instrument-card ${expanded ? 'expanded-card' : 'fretboard-card'}`}>
+  useLayoutEffect(() => {
+    if (prevFretboardInstrumentRef.current !== fretboardInstrument) {
+      if (prevFretboardInstrumentRef.current !== null) {
+        fretboardCompactEnterWidthRef.current = 0;
+        setFretboardPosCompact(false);
+        setFretboardPosMenuOpen(false);
+      }
+      prevFretboardInstrumentRef.current = fretboardInstrument;
+    }
+
+    const el = fretboardHeaderActionsRef.current;
+    if (!el) return;
+    const HYSTERESIS_PX = 100;
+    /** Below this, pills + mode + utilities overlap/stack even when scrollWidth matches (flex shrink). */
+    const MIN_WIDTH_FOR_PILLS_PX = 520;
+
+    const check = () => {
+      const cw = el.clientWidth;
+      const sw = el.scrollWidth;
+      const overflowsX = sw > cw + 2;
+      const tooNarrowForPills = cw < MIN_WIDTH_FOR_PILLS_PX;
+      setFretboardPosCompact((prev) => {
+        if (!prev) {
+          if (overflowsX || tooNarrowForPills) {
+            fretboardCompactEnterWidthRef.current = cw;
+            return true;
+          }
+        } else {
+          const minExit = Math.max(
+            fretboardCompactEnterWidthRef.current + HYSTERESIS_PX,
+            MIN_WIDTH_FOR_PILLS_PX,
+          );
+          if (cw >= minExit) {
+            return false;
+          }
+        }
+        return prev;
+      });
+    };
+
+    check();
+    const ro = new ResizeObserver(() => {
+      requestAnimationFrame(check);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [expandedInstrument, collapsedInstruments, fretboardInstrument, currentSong]);
+
+  useEffect(() => {
+    if (!fretboardPosCompact) setFretboardPosMenuOpen(false);
+  }, [fretboardPosCompact]);
+
+  useEffect(() => {
+    if (!fretboardPosMenuOpen) return;
+    const onPtr = (e: PointerEvent) => {
+      const w = posNavMenuWrapRef.current;
+      if (w && !w.contains(e.target as Node)) setFretboardPosMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFretboardPosMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPtr);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onPtr);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [fretboardPosMenuOpen]);
+
+  const renderGuitar = (expanded: boolean) => {
+    const fretboard = (
+      <Fretboard
+        highlightNotes={displayNotes}
+        ghostNotes={
+          fretboardInstrument === 'bass' && selectedScale ? bassGhostNotes : []
+        }
+        highlightMidis={
+          fretboardInstrument === 'bass' && isPlaying && liveBassMidi != null
+            ? [liveBassMidi]
+            : null
+        }
+        ghostMidis={
+          fretboardInstrument === 'bass' && !selectedScale ? bassChordGhostMidis : null
+        }
+        root={displayRoot}
+        startFret={fretRange.startFret}
+        endFret={fretRange.endFret}
+        mode={fretboardInstrument === 'bass' ? 'scale' : fretboardMode}
+        strings={fretboardInstrument === 'bass' ? BASS_STRINGS : undefined}
+        degreeColorMap={chromaColorMap}
+        chordTab={fretboardInstrument === 'bass' ? null : (tappedGuitarTab || displayChordTab)}
+        editable={fretboardInstrument === 'guitar'}
+        onFretClick={fretboardInstrument === 'guitar' ? handleToggleGuitarFret : undefined}
+        showNoteLabels={fretboardInstrument !== 'bass'}
+        pitchClassLabels={fretboardInstrument === 'bass' ? !showBassOctaves : false}
+        getFretDotLabel={fretboardInstrument === 'bass' ? bassFretDotLabel : undefined}
+        dedupeHighlightGhostToLowest={fretboardInstrument === 'bass' && !showBassOctaves}
+        stringOpenMidis={fretboardInstrument === 'bass' ? BASS_OPEN_MIDIS : undefined}
+      />
+    );
+
+    return (
+    <div
+      className={`instrument-card ${expanded ? 'expanded-card' : 'fretboard-card'}${
+        fretboardPosMenuOpen ? ' instrument-card--pos-menu-open' : ''
+      }`}
+    >
       <div className="instrument-header instrument-header--fretboard-only">
-        <div className="instrument-header-actions">
+        <div className="instrument-header-actions" ref={fretboardHeaderActionsRef}>
           <div className="fretboard-mode-toggle" role="group" aria-label="Instrument">
             <button
               type="button"
@@ -1123,60 +1269,116 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
             </button>
           </div>
           {fretboardInstrument === 'guitar' && displayNotes.length > 0 && (
-            <div className="guitar-position-nav">
-              <button
-                type="button"
-                className="cycle-btn guitar-pos-arrow"
-                aria-label="Previous position"
-                title="Previous position"
-                onClick={() => {
-                  const nextIdx = (guitarOptionIdx - 1 + guitarOptionLabels.length) % guitarOptionLabels.length;
-                  setGuitarPosition(guitarOptionLabels[nextIdx].value);
-                  setGuitarVoicingVariant(0);
-                }}
-              >
-                ◀
-              </button>
-              <div className="position-buttons guitar-position-buttons">
-                {guitarOptionLabels.map(opt => (
+            <div className="guitar-position-nav guitar-position-nav--header-only">
+              {fretboardPosCompact ? (
+                <div className="pos-nav-menu-wrap" ref={posNavMenuWrapRef}>
                   <button
-                    key={opt.value}
-                    className={`pos-btn ${guitarPosition === opt.value ? 'active' : ''}`}
-                    onClick={() => {
-                      setGuitarPosition(opt.value);
-                      setGuitarVoicingVariant(0);
-                    }}
+                    type="button"
+                    className={`pos-nav-hamburger cycle-btn guitar-pos-arrow ${fretboardPosMenuOpen ? 'active' : ''}`}
+                    aria-expanded={fretboardPosMenuOpen}
+                    aria-haspopup="menu"
+                    aria-label="Fret positions"
+                    title="Fret positions"
+                    onClick={() => setFretboardPosMenuOpen((o) => !o)}
                   >
-                    {opt.label === 'All Frets' ? 'All' : opt.label.replace('Pos ', 'P')}
+                    <span className="pos-nav-hamburger-icon" aria-hidden>
+                      ☰
+                    </span>
                   </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                className="cycle-btn guitar-pos-arrow"
-                aria-label="Next position"
-                title="Next position"
-                onClick={() => {
-                  const nextIdx = (guitarOptionIdx + 1) % guitarOptionLabels.length;
-                  setGuitarPosition(guitarOptionLabels[nextIdx].value);
-                  setGuitarVoicingVariant(0);
-                }}
-              >
-                ▶
-              </button>
+                  {fretboardPosMenuOpen && (
+                    <div
+                      className={`pos-nav-menu${guitarOptionLabels.length > 2 ? ' pos-nav-menu--grid' : ''}`}
+                      role="menu"
+                    >
+                      {guitarOptionLabels.map((opt) => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          role="menuitem"
+                          className={`pos-nav-menu-item ${guitarPosition === opt.value ? 'active' : ''}`}
+                          onClick={() => {
+                            setGuitarPosition(opt.value);
+                            setGuitarVoicingVariant(0);
+                            setFretboardPosMenuOpen(false);
+                          }}
+                        >
+                          {opt.label === 'All Frets' ? 'All' : opt.label.replace('Pos ', 'P')}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="position-buttons guitar-position-buttons">
+                  {guitarOptionLabels.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      className={`pos-btn ${guitarPosition === opt.value ? 'active' : ''}`}
+                      onClick={() => {
+                        setGuitarPosition(opt.value);
+                        setGuitarVoicingVariant(0);
+                      }}
+                    >
+                      {opt.label === 'All Frets' ? 'All' : opt.label.replace('Pos ', 'P')}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {fretboardInstrument === 'bass' && (
-            <div className="position-buttons">
-              {BASS_POSITIONS.map((pos, idx) => (
-                <button
-                  key={pos.label}
-                  className={`pos-btn ${bassPosition === idx ? 'active' : ''}`}
-                  onClick={() => setBassPosition(idx as 0 | 1 | 2)}
-                >
-                  {pos.label}
-                </button>
-              ))}
+            <>
+              {fretboardPosCompact ? (
+                <div className="position-buttons position-buttons--compact">
+                  <div className="pos-nav-menu-wrap" ref={posNavMenuWrapRef}>
+                    <button
+                      type="button"
+                      className={`pos-nav-hamburger pos-nav-hamburger--bass cycle-btn ${fretboardPosMenuOpen ? 'active' : ''}`}
+                      aria-expanded={fretboardPosMenuOpen}
+                      aria-haspopup="menu"
+                      aria-label="Bass positions"
+                      title="Bass positions"
+                      onClick={() => setFretboardPosMenuOpen((o) => !o)}
+                    >
+                      <span className="pos-nav-hamburger-icon" aria-hidden>
+                        ☰
+                      </span>
+                    </button>
+                    {fretboardPosMenuOpen && (
+                      <div className="pos-nav-menu pos-nav-menu--grid" role="menu">
+                        {BASS_POSITIONS.map((pos, idx) => (
+                          <button
+                            key={pos.label}
+                            type="button"
+                            role="menuitem"
+                            className={`pos-nav-menu-item ${bassPosition === idx ? 'active' : ''}`}
+                            onClick={() => {
+                              setBassPosition(idx as 0 | 1 | 2);
+                              setFretboardPosMenuOpen(false);
+                            }}
+                          >
+                            {pos.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="position-buttons">
+                  {BASS_POSITIONS.map((pos, idx) => (
+                    <button
+                      key={pos.label}
+                      type="button"
+                      className={`pos-btn ${bassPosition === idx ? 'active' : ''}`}
+                      onClick={() => setBassPosition(idx as 0 | 1 | 2)}
+                    >
+                      {pos.label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <button
                 type="button"
                 className={`staff-names-btn ${showBassAllNoteNames ? 'active' : ''}`}
@@ -1201,7 +1403,7 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
               >
                 Oct
               </button>
-            </div>
+            </>
           )}
           {fretboardInstrument === 'guitar' && isFretboardEditable && editableGuitarTab != null && (
             <button
@@ -1249,24 +1451,39 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
       <div className="instrument-card-body">
       {!collapsedInstruments.has('guitar') && (
         <>
-          <Fretboard
-            highlightNotes={displayNotes}
-            ghostNotes={fretboardInstrument === 'bass' ? bassGhostNotes : []}
-            root={displayRoot}
-            startFret={fretRange.startFret}
-            endFret={fretRange.endFret}
-            mode={fretboardInstrument === 'bass' ? 'scale' : fretboardMode}
-            strings={fretboardInstrument === 'bass' ? BASS_STRINGS : undefined}
-            degreeColorMap={chromaColorMap}
-            chordTab={fretboardInstrument === 'bass' ? null : (tappedGuitarTab || displayChordTab)}
-            editable={fretboardInstrument === 'guitar'}
-            onFretClick={fretboardInstrument === 'guitar' ? handleToggleGuitarFret : undefined}
-            showNoteLabels={fretboardInstrument !== 'bass'}
-            pitchClassLabels={false}
-            getFretDotLabel={fretboardInstrument === 'bass' ? bassFretDotLabel : undefined}
-            dedupeHighlightGhostToLowest={fretboardInstrument === 'bass' && !showBassOctaves}
-            stringOpenMidis={fretboardInstrument === 'bass' ? BASS_OPEN_MIDIS : undefined}
-          />
+          {fretboardInstrument === 'guitar' && displayNotes.length > 0 ? (
+            <div className="fretboard-with-pos-arrows">
+              <button
+                type="button"
+                className="fretboard-pos-arrow"
+                aria-label="Previous position"
+                title="Previous position"
+                onClick={() => {
+                  const nextIdx = (guitarOptionIdx - 1 + guitarOptionLabels.length) % guitarOptionLabels.length;
+                  setGuitarPosition(guitarOptionLabels[nextIdx].value);
+                  setGuitarVoicingVariant(0);
+                }}
+              >
+                ◀
+              </button>
+              <div className="fretboard-with-pos-arrows-board">{fretboard}</div>
+              <button
+                type="button"
+                className="fretboard-pos-arrow"
+                aria-label="Next position"
+                title="Next position"
+                onClick={() => {
+                  const nextIdx = (guitarOptionIdx + 1) % guitarOptionLabels.length;
+                  setGuitarPosition(guitarOptionLabels[nextIdx].value);
+                  setGuitarVoicingVariant(0);
+                }}
+              >
+                ▶
+              </button>
+            </div>
+          ) : (
+            fretboard
+          )}
           {fretboardInstrument === 'bass' ? (
             <div className="analysis-empty" style={{ marginTop: '8px' }}>
               Bass:{' '}
@@ -1303,7 +1520,8 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
         </button>
       </div>
     </div>
-  );
+    );
+  };
 
   const handleSaveShape = useCallback(async () => {
     if (!selectedChord || guitarPosition < 0) return;

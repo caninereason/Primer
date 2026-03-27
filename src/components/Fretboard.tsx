@@ -1,5 +1,6 @@
 import { useRef, useCallback, useMemo } from 'react';
 import { Note } from 'tonal';
+import { pickBassCellForExactMidi } from '../engine/bassFretboard';
 
 interface FretboardProps {
   highlightNotes: string[];
@@ -36,6 +37,10 @@ interface FretboardProps {
   dedupeHighlightGhostToLowest?: boolean;
   /** Open-string MIDI per row; same length/order as `strings`. */
   stringOpenMidis?: readonly number[];
+  /** When set, draw highlights at exact MIDI cells (bass playback). */
+  highlightMidis?: readonly number[] | null;
+  /** When set, draw ghosts at exact MIDI cells (e.g. walking-bass bar). */
+  ghostMidis?: readonly number[] | null;
 }
 
 const STRINGS = [
@@ -103,6 +108,8 @@ export function Fretboard({
   getFretDotLabel,
   dedupeHighlightGhostToLowest = false,
   stringOpenMidis,
+  highlightMidis = null,
+  ghostMidis = null,
 }: FretboardProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const { set: hlSet, map: nameMap } = chromaInfo(highlightNotes, pitchClassLabels);
@@ -131,6 +138,33 @@ export function Fretboard({
     const ghMap = lowestCellPerChroma(ghostOnly, startFret, endFret, strings, stringOpenMidis!);
     return { hlAnchors: hlMap, ghostAnchors: ghMap };
   }, [dedupeOk, startFret, endFret, strings, stringOpenMidis, highlightNotes, ghostNotes]);
+
+  const { exactHlByKey, exactGhByKey } = useMemo(() => {
+    const hlMap = new Map<string, number>();
+    const ghMap = new Map<string, number>();
+    const om = stringOpenMidis;
+    if (!om || om.length < strings.length) {
+      return { exactHlByKey: hlMap, exactGhByKey: ghMap };
+    }
+    const hlMidiSkip = new Set(highlightMidis ?? []);
+    for (const m of highlightMidis ?? []) {
+      const cell = pickBassCellForExactMidi(m, startFret, endFret, om, strings.length);
+      if (cell) hlMap.set(`${cell.si}-${cell.fret}`, m);
+    }
+    const hlCells = new Set(hlMap.keys());
+    for (const m of ghostMidis ?? []) {
+      if (hlMidiSkip.has(m)) continue;
+      const cell = pickBassCellForExactMidi(m, startFret, endFret, om, strings.length);
+      if (!cell) continue;
+      const k = `${cell.si}-${cell.fret}`;
+      if (hlCells.has(k)) continue;
+      if (!ghMap.has(k)) ghMap.set(k, m);
+    }
+    return { exactHlByKey: hlMap, exactGhByKey: ghMap };
+  }, [stringOpenMidis, strings.length, startFret, endFret, highlightMidis, ghostMidis]);
+
+  const useExactHl = (highlightMidis?.length ?? 0) > 0;
+  const useExactGhost = (ghostMidis?.length ?? 0) > 0;
 
   const totalFrets = endFret - startFret + 1;
   const compact = totalFrets <= 6;
@@ -332,19 +366,51 @@ export function Fretboard({
           for (let f = startFret; f <= endFret; f++) frets.push(f);
 
           return frets.map(fret => {
+            const key = `${si}-${fret}`;
+            const exHlMidi = exactHlByKey.get(key);
+            const exGhMidi = exactGhByKey.get(key);
             const ch = (s.chroma + fret) % 12;
-            const isGhost = ghostSet.has(ch) && !hlSet.has(ch);
-            if (!hlSet.has(ch) && !isGhost) return null;
 
-            if (dedupeOk && hlAnchors && ghostAnchors) {
-              if (hlSet.has(ch)) {
+            let isGhost = false;
+            let draw = false;
+
+            if (exHlMidi != null) {
+              draw = true;
+              isGhost = false;
+            } else if (!useExactHl && hlSet.has(ch)) {
+              if (dedupeOk && hlAnchors) {
                 const a = hlAnchors.get(ch);
-                if (!a || a.si !== si || a.fret !== fret) return null;
-              } else if (isGhost) {
-                const a = ghostAnchors.get(ch);
-                if (!a || a.si !== si || a.fret !== fret) return null;
+                if (!a || a.si !== si || a.fret !== fret) {
+                  /* skip */
+                } else {
+                  draw = true;
+                  isGhost = false;
+                }
+              } else {
+                draw = true;
+                isGhost = false;
               }
             }
+
+            if (!draw) {
+              if (exGhMidi != null) {
+                draw = true;
+                isGhost = true;
+              } else if (!useExactGhost && ghostSet.has(ch) && !hlSet.has(ch)) {
+                if (dedupeOk && ghostAnchors) {
+                  const a = ghostAnchors.get(ch);
+                  if (a && a.si === si && a.fret === fret) {
+                    draw = true;
+                    isGhost = true;
+                  }
+                } else {
+                  draw = true;
+                  isGhost = true;
+                }
+              }
+            }
+
+            if (!draw) return null;
 
             const isR = ch === rootChroma;
             const dotR = compact ? (isR ? 7 : 6) : (isR ? 6 : 5.5);
@@ -352,13 +418,30 @@ export function Fretboard({
             const dotFill = degreeColorMap
               ? (degreeColorMap.get(ch) || '#00d4aa')
               : (isR ? '#6c63ff' : '#00d4aa');
+
+            const midiForExact =
+              exHlMidi ?? (isGhost ? exGhMidi : undefined) ?? undefined;
+            const exactName =
+              midiForExact != null ? Note.fromMidi(midiForExact) : null;
+            const exactFallback =
+              exactName != null
+                ? pitchClassLabels
+                  ? (Note.pitchClass(exactName) || exactName)
+                  : exactName
+                : undefined;
+
             const customLabel = getFretDotLabel?.({
               chroma: ch,
               stringIndex: si,
               fret,
               kind: isGhost ? 'ghost' : 'highlight',
             });
-            const fallbackLabel = isGhost ? ghostNameMap.get(ch) : nameMap.get(ch);
+            const fallbackLabel =
+              exactFallback != null
+                ? exactFallback
+                : isGhost
+                  ? ghostNameMap.get(ch)
+                  : nameMap.get(ch);
             const labelText =
               getFretDotLabel != null ? customLabel : fallbackLabel;
             const showText =
@@ -369,7 +452,7 @@ export function Fretboard({
               if (isGhost) {
                 return degreeColorMap != null ? 0.92 : 0.26;
               }
-              if (degreeColorMap != null && ghostSet.size > 0) {
+              if (degreeColorMap != null && (ghostSet.size > 0 || useExactGhost)) {
                 return 0.48;
               }
               return 0.92;

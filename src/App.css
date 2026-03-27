@@ -146,11 +146,15 @@
 
 .main-content {
   flex: 1;
+  min-width: 0; /* flex child: allow shrink so wide SVGs don’t force a horizontal scrollbar (“ruler”) */
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  position: relative;
+  z-index: 1; /* stay above scale strip/sidebar when layouts overlap at odd zoom */
 }
 
 /* ── Instrument Bar ── */
@@ -158,6 +162,9 @@
 .instrument-bar {
   display: flex;
   gap: 10px;
+  min-width: 0;
+  position: relative;
+  z-index: 4;
 }
 
 .instrument-card {
@@ -173,6 +180,11 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  isolation: isolate; /* body vs footer z-index stays inside the card */
+}
+
+.instrument-card--pos-menu-open {
+  overflow: visible;
 }
 
 .instrument-card-body {
@@ -180,6 +192,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
+  z-index: 2; /* staff / piano / fretboard above footer row when subpixel zoom causes overlap */
 }
 
 .instrument-card-footer {
@@ -189,6 +203,8 @@
   margin-top: auto;
   padding-top: 8px;
   flex-shrink: 0;
+  position: relative;
+  z-index: 1;
 }
 
 .instrument-panel-expand {
@@ -258,12 +274,13 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 16px;
-  overflow: hidden;
+  overflow: visible; /* don’t clip staff/SVG; main-content already clips overflow-x */
   display: flex;
   flex-direction: column;
   position: relative;
-  z-index: 2;
+  z-index: 3; /* below chord chart / bar when zoom causes overlap */
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .expanded-card .staff-container {
@@ -280,6 +297,22 @@
 
 .expanded-card .fretboard-container svg {
   max-height: 280px;
+}
+
+/* Expanded: don’t stretch body + pin footer with margin-top:auto (same card uses overflow:hidden).
+   That combo can clip the bottom of staff/piano/fretboard so the footer row looks like it’s covering content. */
+.expanded-card.instrument-card .instrument-card-body {
+  flex: 0 1 auto;
+}
+
+.expanded-card.instrument-card .instrument-card-footer {
+  margin-top: 0;
+  padding-top: 10px;
+}
+
+.expanded-card .piano-container,
+.expanded-card .fretboard-container {
+  flex: 0 0 auto;
 }
 
 /* Instrument header (label + dropdown) */
@@ -504,11 +537,16 @@
   gap: 4px;
 }
 
-/* Guitar: ◀ All P1 P2 … ▶ — single row; pills shrink with card (cqi) */
+/* Guitar: pills or ☰ in header; ◀ ▶ live beside fretboard */
 .guitar-position-nav {
   display: flex;
   align-items: center;
   gap: clamp(3px, 0.9cqi, 5px);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.guitar-position-nav--header-only {
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -551,6 +589,107 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+/* Collapsed position pills (overflow): hamburger + flyout menu */
+.pos-nav-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.pos-nav-hamburger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.pos-nav-hamburger.active {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.pos-nav-hamburger-icon {
+  font-size: 14px;
+  font-weight: 700;
+  transform: translateY(-1px);
+}
+
+.instrument-card .instrument-header .pos-nav-hamburger--bass {
+  box-sizing: border-box;
+  width: var(--instrument-ctl-h);
+  height: var(--instrument-ctl-h);
+  min-width: var(--instrument-ctl-h);
+  border-radius: var(--instrument-ctl-radius);
+  font-size: clamp(7px, 2cqi, 10px);
+}
+
+.position-buttons--compact {
+  flex: 0 0 auto;
+}
+
+.pos-nav-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 60;
+  box-sizing: border-box;
+  min-width: 4.75rem;
+  max-width: 11rem;
+  max-height: min(36vh, 200px);
+  padding: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+}
+
+.pos-nav-menu--grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  min-width: 6.25rem;
+  max-width: 11rem;
+}
+
+.pos-nav-menu--grid .pos-nav-menu-item {
+  text-align: center;
+  padding: 4px 4px;
+  font-size: 10px;
+}
+
+.pos-nav-menu-item {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition), color var(--transition);
+}
+
+.pos-nav-menu-item:hover {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.pos-nav-menu-item.active {
+  background: var(--accent-primary-dim);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
 }
 
 .pos-btn {
@@ -709,6 +848,8 @@
 
 .piano-container svg {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   height: auto;
   max-height: 90px;
 }
@@ -738,8 +879,62 @@
 
 .fretboard-container svg {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   height: auto;
   max-height: 108px;
+}
+
+/* Guitar position ◀ ▶ beside fretboard (arrows removed from header) */
+.fretboard-with-pos-arrows {
+  display: flex;
+  align-items: center;
+  gap: clamp(4px, 1.2cqi, 10px);
+  width: 100%;
+  min-width: 0;
+}
+
+.fretboard-with-pos-arrows-board {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.fretboard-with-pos-arrows-board .fretboard-container {
+  width: 100%;
+}
+
+.fretboard-pos-arrow {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  width: 28px;
+  min-width: 28px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color var(--transition), color var(--transition), background var(--transition);
+}
+
+.fretboard-pos-arrow:hover {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+  background: var(--bg-hover);
+}
+
+.expanded-card .fretboard-pos-arrow {
+  height: 44px;
+  min-height: 44px;
 }
 
 /* ── Staff (standalone fallback) ── */
@@ -767,6 +962,8 @@
 
 .staff-render svg {
   display: block;
+  max-width: 100%;
+  height: auto;
 }
 
 /* ── Chord Chart ── */
@@ -776,6 +973,8 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 14px;
+  position: relative;
+  z-index: 4;
 }
 
 .chart-header {
@@ -1199,6 +1398,8 @@
   align-items: stretch;
   transition: width 0.25s ease, min-width 0.25s ease;
   overflow: hidden;
+  position: relative;
+  z-index: 0;
 }
 
 .scale-panel--expanded {
@@ -1770,6 +1971,8 @@
   flex-direction: column;
   overflow: hidden;
   flex: 1;
+  position: relative;
+  z-index: 4;
 }
 
 .library-header {
