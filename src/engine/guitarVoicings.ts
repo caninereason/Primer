@@ -156,7 +156,25 @@ export function generatePlayableVoicings(
   databaseShapes?: GuitarTab[],
   preferredShape?: GuitarTab | null,
 ): GuitarTab[] {
-  if (chordChromas.size === 0) return [];
+  // Highlight set can be empty (e.g. chord notes not resolved yet) — still show DB / preferred shapes
+  // so library + saved custom voicings update on the fretboard.
+  if (chordChromas.size === 0) {
+    const out: GuitarTab[] = [];
+    const seen = new Set<string>();
+    const add = (tab: GuitarTab) => {
+      const key = tab.map((f) => f ?? 'x').join(',');
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(tab);
+    };
+    if (preferredShape) add(preferredShape);
+    if (databaseShapes && databaseShapes.length > 0) {
+      for (const s of databaseShapes) {
+        if (s && out.length < MAX_VOICINGS) add(s);
+      }
+    }
+    return out;
+  }
 
   const candidates: (number | null)[][] = [];
   for (let si = 0; si < 6; si++) {

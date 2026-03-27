@@ -207,6 +207,46 @@
   z-index: 1;
 }
 
+.instrument-card-footer--fretboard {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.instrument-card-footer-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.guitar-position-footer {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Off-layout clone of pill row — width vs fretboard column drives hamburger */
+.guitar-pos-pills-measure {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  width: max-content;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.guitar-position-footer .guitar-position-nav {
+  flex: 0 1 auto;
+  width: 100%;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* Base .guitar-position-buttons uses flex:1 — that fills the row and keeps pills left */
+.guitar-position-footer .guitar-position-nav .guitar-position-buttons,
+.guitar-position-footer .guitar-position-nav .pos-nav-menu-wrap {
+  flex: 0 0 auto;
+}
+
 .instrument-panel-expand {
   width: 24px;
   height: 24px;
@@ -384,6 +424,19 @@
   flex: none;
 }
 
+.instrument-header-actions--fretboard {
+  justify-content: space-between;
+}
+
+.fretboard-header-leading {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: clamp(3px, 1.1cqi, 6px);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .instrument-header--fretboard-only .save-chord-btn {
   flex-shrink: 1;
   min-width: 0;
@@ -393,6 +446,23 @@
   font-size: clamp(8px, 2.1cqi, 11px);
   padding: 0 clamp(3px, 1.2cqi, 6px);
   border-radius: var(--instrument-ctl-radius);
+}
+
+/* Guitar header right: positions (when expanded) + piano link + panel min */
+.fretboard-header-trailing {
+  display: flex;
+  align-items: center;
+  gap: clamp(3px, 1.1cqi, 6px);
+  margin-left: auto;
+  flex-shrink: 0;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+.fretboard-header-trailing .guitar-position-nav {
+  flex: 0 1 auto;
+  min-width: 0;
+  justify-content: flex-end;
 }
 
 .instrument-header--fretboard-only .instrument-header-actions > span {
@@ -537,7 +607,7 @@
   gap: 4px;
 }
 
-/* Guitar: pills or ☰ in header; ◀ ▶ live beside fretboard */
+/* Guitar: All / P1… — ☰ only in collapsed grid footer when narrow; expanded: pills top-right in header */
 .guitar-position-nav {
   display: flex;
   align-items: center;
@@ -906,6 +976,15 @@
   width: 100%;
 }
 
+.guitar-slash-bass-caption {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  letter-spacing: 0.02em;
+}
+
 .fretboard-pos-arrow {
   box-sizing: border-box;
   flex-shrink: 0;
@@ -935,6 +1014,19 @@
 .expanded-card .fretboard-pos-arrow {
   height: 44px;
   min-height: 44px;
+}
+
+.fretboard-chord-shift-arrow {
+  width: 24px;
+  min-width: 24px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.fretboard-chord-shift-arrow:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 /* ── Staff (standalone fallback) ── */

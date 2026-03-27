@@ -2,7 +2,7 @@ import guitarData from '../../guitar.json';
 import customChordsRaw from '../customChords.json';
 import { Note, Chord, Scale } from 'tonal';
 import { normalizeNotes } from './noteUtils';
-import type { GuitarTab } from './guitarVoicings';
+import { tabToMidiNotes, type GuitarTab } from './guitarVoicings';
 
 interface DbPosition {
   frets: number[];
@@ -89,6 +89,16 @@ export const CANONICAL_SUFFIX_MAP: Record<string, string> = {
   'mb6': 'mb6',
 };
 
+/** Normalized symbol for custom-chord storage (matches lookup merge keys). */
+export function canonicalChordSymbol(chordSymbol: string): string {
+  const m = chordSymbol.match(/^([A-G][b#]?)(.*)/);
+  if (!m) return chordSymbol;
+  const root = m[1];
+  const rawSuffix = m[2];
+  const canonicalSuffix = CANONICAL_SUFFIX_MAP[rawSuffix] ?? rawSuffix;
+  return `${root}${canonicalSuffix}`;
+}
+
 function positionToTab(pos: DbPosition): GuitarTab {
   return pos.frets.map(f => {
     if (f === -1) return null;
@@ -110,7 +120,8 @@ function rootChromaFromKey(root: string): number | null {
 const TUNING = [4, 9, 2, 7, 11, 4]; // E A D G B e (low E → high e)
 
 /** Pressed frets stay at or below this when building / transposing shapes. */
-const MAX_CHORD_FRET = 12;
+/** Upper bound for generated / validated frets (extended-range neck). */
+const MAX_CHORD_FRET = 24;
 
 function intervalToSemitones(iv: string): number | null {
   const map: Record<string, number> = {
@@ -174,6 +185,39 @@ export function getChordNotes(symbol: string): string[] {
   return normalizeNotes(intervals.map(iv => Note.transpose(root, iv)));
 }
 
+/**
+ * True if physical tab [low E…high e] has ≥3 strings sounding, every pitch is a chord tone,
+ * and the chord root pitch class appears on at least one string.
+ * @param fallbackNotes when getChordNotes(symbol) is empty (exotic spellings), use these (e.g. chart/library notes).
+ */
+export function tabMatchesChordSymbol(
+  tabPhysical: GuitarTab,
+  chordSymbol: string,
+  fallbackNotes?: string[],
+): boolean {
+  let chordNotes = getChordNotes(chordSymbol);
+  if (chordNotes.length === 0 && fallbackNotes && fallbackNotes.length > 0) {
+    chordNotes = normalizeNotes(fallbackNotes);
+  }
+  if (chordNotes.length === 0) return false;
+  const chordChromas = new Set(
+    chordNotes.map((n) => Note.chroma(n)).filter((c): c is number => c != null),
+  );
+  const soundedNames = tabToMidiNotes(tabPhysical, false);
+  if (soundedNames.length < 3) return false;
+  const tabChromas: number[] = [];
+  for (const n of soundedNames) {
+    const c = Note.chroma(n);
+    if (c == null) return false;
+    if (!chordChromas.has(c)) return false;
+    tabChromas.push(c);
+  }
+  const rootMatch = chordSymbol.match(/^([A-G][b#]?)/);
+  const rootCh = rootMatch ? Note.chroma(rootMatch[1]) : null;
+  if (rootCh != null && !tabChromas.includes(rootCh)) return false;
+  return true;
+}
+
 function tabsEqual(a: GuitarTab, b: GuitarTab): boolean {
   return a.length === b.length && a.every((f, i) => f === b[i]);
 }
@@ -219,11 +263,19 @@ function validateShape(tab: GuitarTab): GuitarTab | null {
   return tab;
 }
 
+/** Each Pos 1…5 must own its own tab array (caged[0] / fallbacks were shared and edits collided). */
+function cloneGuitarTab(tab: GuitarTab): GuitarTab {
+  return [...tab] as GuitarTab;
+}
+
 /** For ordering: Pos 1 = closest to nut (lowest min pressed fret), then more open strings, then lower stretch. */
 function shapeNeckSortKey(tab: GuitarTab): { minP: number; maxP: number; opens: number; sumP: number } {
   const pressed = tab.filter((f): f is number => f != null && f > 0);
   const opens = tab.filter(f => f === 0).length;
-  if (pressed.length === 0) return { minP: 999, maxP: 0, opens, sumP: 0 };
+  const sounding = tab.filter(f => f != null);
+  if (sounding.length === 0) return { minP: 999, maxP: 0, opens: 0, sumP: 0 };
+  // Open-string-only voicings must sort before barres (were wrongly using minP 999).
+  if (pressed.length === 0) return { minP: 0, maxP: 0, opens, sumP: 0 };
   const minP = Math.min(...pressed);
   const maxP = Math.max(...pressed);
   const sumP = pressed.reduce((a, b) => a + b, 0);
@@ -579,11 +631,12 @@ export function lookupChordShapes(
               )
             : combinedTemplate.map(tab => (tab ? transposeTab(tab, delta) : null));
 
-        // Merge by index so Pos N matches the C template slot N (same CAGED family).
+        // Prefer algorithmic / guitar.json shapes near the nut; template fills gaps only.
+        // (Transposed C-root templates were winning every slot and e.g. put Am Pos 1 at ~fret 12.)
         const mergeLen = Math.max(baseTabs.length, transposedTemplate.length);
         const merged: (GuitarTab | null)[] = [];
         for (let i = 0; i < mergeLen; i++) {
-          merged[i] = transposedTemplate[i] ?? baseTabs[i] ?? null;
+          merged[i] = baseTabs[i] ?? transposedTemplate[i] ?? null;
         }
         baseTabs = merged;
       }
@@ -606,11 +659,8 @@ export function lookupChordShapes(
     const len = Math.max(baseTabs.length, sysExact?.length ?? 0, userExact?.length ?? 0, 5);
     const finalTabs: (GuitarTab | null)[] = new Array(len).fill(null);
     for (let i = 0; i < len; i++) {
-      // Priority: 1. User Exact, 2. System Exact, 3. Base/Template
-      if (userExact && userExact[i] && userExact[i]!.length === 6) {
-        finalTabs[i] = userExact[i] as GuitarTab;
-        console.debug(`[ChordLookup] Using user shape for "${chordSymbol}" Pos ${i + 1}`);
-      } else if (sysExact && sysExact[i] && sysExact[i].length === 6) {
+      // User saves applied after sort (step 6) so Pos N matches the UI slot index.
+      if (sysExact && sysExact[i] && sysExact[i].length === 6) {
         finalTabs[i] = sysExact[i] as GuitarTab;
       } else {
         finalTabs[i] = (baseTabs[i] ?? null);
@@ -626,17 +676,38 @@ export function lookupChordShapes(
   const caged = (intervals && intervals.length >= 3) ? generateCAGEDShapes(rootChroma, intervals) : [];
 
   const finalBaseTabs: GuitarTab[] = [];
-  const ultimateFallback: GuitarTab = [null, null, null, null, null, null];
+  const emptySlot = (): GuitarTab => [null, null, null, null, null, null];
 
   for (let i = 0; i < 5; i++) {
-    const tabToUse = (baseTabs as any)[i] ||
+    const tabToUse =
+      (baseTabs as any)[i] ||
       fallbackBarreShape(rootChroma, intervals ?? [], i) ||
-      caged[i] || caged[0] || firstValid || ultimateFallback;
-    finalBaseTabs[i] = tabToUse as GuitarTab;
+      caged[i] ||
+      caged[0] ||
+      firstValid ||
+      null;
+    finalBaseTabs[i] = tabToUse ? cloneGuitarTab(tabToUse as GuitarTab) : emptySlot();
   }
 
-  // 6) Pos 1 = lowest on neck (nearest open position); remaining slots ascend by min fret / openness / span.
-  sortChordPositionsNearestNutFirst(finalBaseTabs);
+  const userHasSavedVoicing =
+    userExact?.some((u) => u != null && Array.isArray(u) && u.length === 6) ?? false;
+
+  // 6) Nearest-nut ordering for defaults only. After any user save, skip sort so Pos 1…5 stay aligned with
+  //    stored indices (sort was reshuffling slots and made saves appear to overwrite other positions).
+  if (!userHasSavedVoicing) {
+    sortChordPositionsNearestNutFirst(finalBaseTabs);
+  }
+
+  // 7) User overrides by slot index (Pos 1…5).
+  if (userExact) {
+    for (let i = 0; i < 5; i++) {
+      const u = userExact[i];
+      if (u && u.length === 6) {
+        finalBaseTabs[i] = cloneGuitarTab(u as GuitarTab);
+        console.debug(`[ChordLookup] User shape overlay "${chordSymbol}" Pos ${i + 1}`);
+      }
+    }
+  }
 
   return { tabs: finalBaseTabs, shapeLabels: null };
 }

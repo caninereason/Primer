@@ -16,6 +16,8 @@ interface FretboardProps {
   /** When true, clicking a fret sets that string; nut = open, nut again = mute */
   editable?: boolean;
   onFretClick?: (stringIndex: number, fret: number | null) => void;
+  /** Guitar: clicking a numbered fret extends the view to include the next fret (e.g. click 12 → show 13). */
+  onFretPeek?: (fret: number) => void;
   /** When false, note names inside dots are hidden (dots only). Default true. */
   showNoteLabels?: boolean;
   /** When true, labels use pitch class only (no octave). */
@@ -51,8 +53,8 @@ const STRINGS = [
   { name: 'A', chroma: 9 },
   { name: 'E', chroma: 4 },
 ];
-const MARKERS = new Set([3, 5, 7, 9, 12, 15]);
-const DOUBLE_DOT = new Set([12]);
+const MARKERS = new Set([3, 5, 7, 9, 12, 15, 17, 19, 21, 24]);
+const DOUBLE_DOT = new Set([12, 24]);
 const STR_W = [0.8, 0.8, 1, 1.2, 1.5, 1.8];
 
 function chromaInfo(notes: string[], pitchClassLabels: boolean) {
@@ -103,6 +105,7 @@ export function Fretboard({
   chordTab = null,
   editable = false,
   onFretClick,
+  onFretPeek,
   showNoteLabels = true,
   pitchClassLabels = false,
   getFretDotLabel,
@@ -111,6 +114,8 @@ export function Fretboard({
   highlightMidis = null,
   ghostMidis = null,
 }: FretboardProps) {
+  const rangeLo = Math.min(startFret, endFret);
+  const rangeHi = Math.max(startFret, endFret);
   const svgRef = useRef<SVGSVGElement>(null);
   const { set: hlSet, map: nameMap } = chromaInfo(highlightNotes, pitchClassLabels);
   const { set: ghostSet, map: ghostNameMap } = chromaInfo(ghostNotes, pitchClassLabels);
@@ -130,14 +135,14 @@ export function Fretboard({
     }
     const hl = chromaInfo(highlightNotes, false).set;
     const gs = chromaInfo(ghostNotes, false).set;
-    const hlMap = lowestCellPerChroma(hl, startFret, endFret, strings, stringOpenMidis!);
+    const hlMap = lowestCellPerChroma(hl, rangeLo, rangeHi, strings, stringOpenMidis!);
     const ghostOnly = new Set<number>();
     gs.forEach((c) => {
       if (!hl.has(c)) ghostOnly.add(c);
     });
-    const ghMap = lowestCellPerChroma(ghostOnly, startFret, endFret, strings, stringOpenMidis!);
+    const ghMap = lowestCellPerChroma(ghostOnly, rangeLo, rangeHi, strings, stringOpenMidis!);
     return { hlAnchors: hlMap, ghostAnchors: ghMap };
-  }, [dedupeOk, startFret, endFret, strings, stringOpenMidis, highlightNotes, ghostNotes]);
+  }, [dedupeOk, rangeLo, rangeHi, strings, stringOpenMidis, highlightNotes, ghostNotes]);
 
   const { exactHlByKey, exactGhByKey } = useMemo(() => {
     const hlMap = new Map<string, number>();
@@ -148,30 +153,30 @@ export function Fretboard({
     }
     const hlMidiSkip = new Set(highlightMidis ?? []);
     for (const m of highlightMidis ?? []) {
-      const cell = pickBassCellForExactMidi(m, startFret, endFret, om, strings.length);
+      const cell = pickBassCellForExactMidi(m, rangeLo, rangeHi, om, strings.length);
       if (cell) hlMap.set(`${cell.si}-${cell.fret}`, m);
     }
     const hlCells = new Set(hlMap.keys());
     for (const m of ghostMidis ?? []) {
       if (hlMidiSkip.has(m)) continue;
-      const cell = pickBassCellForExactMidi(m, startFret, endFret, om, strings.length);
+      const cell = pickBassCellForExactMidi(m, rangeLo, rangeHi, om, strings.length);
       if (!cell) continue;
       const k = `${cell.si}-${cell.fret}`;
       if (hlCells.has(k)) continue;
       if (!ghMap.has(k)) ghMap.set(k, m);
     }
     return { exactHlByKey: hlMap, exactGhByKey: ghMap };
-  }, [stringOpenMidis, strings.length, startFret, endFret, highlightMidis, ghostMidis]);
+  }, [stringOpenMidis, strings.length, rangeLo, rangeHi, highlightMidis, ghostMidis]);
 
   const useExactHl = (highlightMidis?.length ?? 0) > 0;
   const useExactGhost = (ghostMidis?.length ?? 0) > 0;
 
-  const totalFrets = endFret - startFret + 1;
+  const totalFrets = rangeHi - rangeLo + 1;
   const compact = totalFrets <= 6;
 
-  const hasOpen = startFret === 0;
-  const firstFretSlot = hasOpen ? 1 : startFret;
-  const numFretSlots = endFret - firstFretSlot + 1;
+  const hasOpen = rangeLo === 0;
+  const firstFretSlot = hasOpen ? 1 : rangeLo;
+  const numFretSlots = Math.max(1, rangeHi - firstFretSlot + 1);
 
   const ss = compact ? 18 : 16;
   const fs = compact ? 52 : 34;
@@ -195,34 +200,41 @@ export function Fretboard({
 
   const handleSvgClick = useCallback(
     (e: React.MouseEvent<SVGSVGElement>) => {
-      if (!editable || !onFretClick || !svgRef.current) return;
+      if (!svgRef.current) return;
+      if (!editable && !onFretPeek) return;
       const svg = svgRef.current;
-      
-      // Robust screen-to-SVG coordinate mapping
+
       const pt_svg = svg.createSVGPoint();
       pt_svg.x = e.clientX;
       pt_svg.y = e.clientY;
       const cursorPT = pt_svg.matrixTransform(svg.getScreenCTM()?.inverse());
-      
+
       const x = cursorPT.x;
       const y = cursorPT.y;
 
       const si = Math.max(0, Math.min(strings.length - 1, Math.round((y - pt) / ss)));
       if (x < fretAreaStart) {
-        const current = chordTab?.[si];
-        if (current === 0) onFretClick(si, null);
-        else onFretClick(si, 0);
+        if (editable && onFretClick) {
+          const current = chordTab?.[si];
+          if (current === 0) onFretClick(si, null);
+          else onFretClick(si, 0);
+        }
         return;
       }
       const fretIndex = Math.floor((x - fretAreaStart) / fs);
       const fret = firstFretSlot + fretIndex;
-      if (fret >= startFret && fret <= endFret) {
+      if (fret < rangeLo || fret > rangeHi) return;
+
+      if (editable && onFretClick) {
         const current = chordTab?.[si];
         if (current === fret) onFretClick(si, null);
         else onFretClick(si, fret);
+        if (fret > 0) onFretPeek?.(fret);
+      } else if (onFretPeek && fret > 0) {
+        onFretPeek(fret);
       }
     },
-    [editable, onFretClick, chordTab, pt, ss, fretAreaStart, fs, firstFretSlot, startFret, endFret, strings.length]
+    [editable, onFretClick, onFretPeek, chordTab, pt, ss, fretAreaStart, fs, firstFretSlot, rangeLo, rangeHi, strings.length]
   );
 
   const barreFret =
@@ -251,7 +263,7 @@ export function Fretboard({
         viewBox={`0 0 ${W} ${H}`}
         preserveAspectRatio="xMidYMid meet"
         onClick={handleSvgClick}
-        style={editable ? { cursor: 'pointer' } : undefined}
+        style={editable || onFretPeek ? { cursor: 'pointer' } : undefined}
       >
         {editable && <title>Click fret to set note, click nut for open, click nut again to mute</title>}
         {/* Nut markers (X for muted strings) */}
@@ -363,7 +375,7 @@ export function Fretboard({
           }
 
           const frets: number[] = [];
-          for (let f = startFret; f <= endFret; f++) frets.push(f);
+          for (let f = rangeLo; f <= rangeHi; f++) frets.push(f);
 
           return frets.map(fret => {
             const key = `${si}-${fret}`;
