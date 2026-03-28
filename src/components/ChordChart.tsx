@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import type { Measure, ChordInfo } from '../types/music';
 import type { ReactNode } from 'react';
+import { resolveChartMeasures, CHART_MEASURES_PER_ROW } from '../engine/chartGridPlacement';
 
 interface ChordChartProps {
   measures: Measure[];
@@ -49,8 +50,6 @@ const SECTION_COLORS: Record<string, string> = {
   V: '#ff9f43',
   i: '#a29bfe',
 };
-
-const MEASURES_PER_ROW = 4;
 
 const NOTE_CHROMA: Record<string, number> = {
   C: 0, 'C#': 1, Db: 1, D: 2, 'D#': 3, Eb: 3,
@@ -147,24 +146,13 @@ export function ChordChart({
   onRepeatToClick,
 }: ChordChartProps) {
   const [showFunctions, setShowFunctions] = useState(true);
+  /** Hide chord grid only; header (title + transport + meta) stays visible. */
+  const [chartMinimized, setChartMinimized] = useState(false);
   const holdTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const holdTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const holdDelayRef = useRef(400);
 
-  // Pre-process measures to resolve repeats (%)
-  const resolvedMeasures = useMemo(() => {
-    const result: Measure[] = [];
-    let lastChords: ChordInfo[] = [];
-    for (const m of measures) {
-      if (m.chords.length === 0) {
-        result.push({ ...m, chords: lastChords });
-      } else {
-        lastChords = m.chords;
-        result.push(m);
-      }
-    }
-    return result;
-  }, [measures]);
+  const resolvedMeasures = useMemo(() => resolveChartMeasures(measures), [measures]);
 
   const clearHold = useCallback(() => {
     if (holdTimeoutRef.current) {
@@ -189,15 +177,15 @@ export function ChordChart({
   }, [onBpmChange]);
 
   const maxCPM = Math.max(1, ...resolvedMeasures.map((m: Measure) => m.chords.length));
-  const cols = MEASURES_PER_ROW * maxCPM;
+  const cols = CHART_MEASURES_PER_ROW * maxCPM;
 
   const measureRows: Measure[][] = [];
-  for (let i = 0; i < resolvedMeasures.length; i += MEASURES_PER_ROW) {
-    measureRows.push(resolvedMeasures.slice(i, i + MEASURES_PER_ROW));
+  for (let i = 0; i < resolvedMeasures.length; i += CHART_MEASURES_PER_ROW) {
+    measureRows.push(resolvedMeasures.slice(i, i + CHART_MEASURES_PER_ROW));
   }
 
   return (
-    <div className="chord-chart">
+    <div className={`chord-chart${chartMinimized ? ' chord-chart--minimized' : ''}`}>
       <div className="chart-header">
         <div className="chart-header-top">
           <h2 className="chart-title">{songTitle}</h2>
@@ -305,6 +293,15 @@ export function ChordChart({
             >
               RNA
             </button>
+            <button
+              type="button"
+              className="expand-btn chart-grid-collapse-btn"
+              onClick={() => setChartMinimized(v => !v)}
+              title={chartMinimized ? 'Show chord grid' : 'Hide chord grid (header only)'}
+              aria-label={chartMinimized ? 'Show chord grid' : 'Hide chord grid'}
+            >
+              {chartMinimized ? '+' : '−'}
+            </button>
           </div>
         </div>
         <div className="chart-meta">
@@ -392,11 +389,12 @@ export function ChordChart({
           </span>
         </div>
       </div>
-      {repeatPicker && (
+      {!chartMinimized && repeatPicker && (
         <div className="repeat-picker-hint" role="status">
           {repeatPicker === 'from' ? 'Click a chord to set repeat start' : 'Click a chord to set repeat end'}
         </div>
       )}
+      {!chartMinimized && (
       <div className="chart-grid">
         {measureRows.map((row, ri) => {
           const cells: ReactNode[] = [];
@@ -404,7 +402,7 @@ export function ChordChart({
           
           while (i < row.length) {
             const measure = row[i];
-            const mi = ri * MEASURES_PER_ROW + i;
+            const mi = ri * CHART_MEASURES_PER_ROW + i;
             const color = measure.section 
               ? SECTION_COLORS[measure.section] || '#6c63ff'
               : undefined;
@@ -418,7 +416,6 @@ export function ChordChart({
                 const isSelected = mi === selectedMeasure && selectedChordIdx === ci2;
                 const isRepeatFrom = repeatFrom?.measureIdx === mi && repeatFrom?.chordIdx === ci2;
                 const isRepeatTo = repeatTo?.measureIdx === mi && repeatTo?.chordIdx === ci2;
-                
                 const colSpan = baseSpan + (ci2 < extras ? 1 : 0);
 
                 cells.push(
@@ -452,14 +449,13 @@ export function ChordChart({
                 (row[nextI].chords[0]?.symbol === startChord?.symbol)
               ) {
                 colSpan++;
-                measuresInSpan.push(ri * MEASURES_PER_ROW + nextI);
+                measuresInSpan.push(ri * CHART_MEASURES_PER_ROW + nextI);
                 nextI++;
               }
 
               const isSelected = measuresInSpan.includes(selectedMeasure as number) && selectedChordIdx === 0;
               const isRepeatFrom = measuresInSpan.some(m => repeatFrom?.measureIdx === m && repeatFrom?.chordIdx === 0);
               const isRepeatTo = measuresInSpan.some(m => repeatTo?.measureIdx === m && repeatTo?.chordIdx === 0);
-
               cells.push(
                 <div
                   key={`${ri}-${i}-span`}
@@ -479,7 +475,7 @@ export function ChordChart({
             }
           }
 
-          const padMeasures = MEASURES_PER_ROW - row.length;
+          const padMeasures = CHART_MEASURES_PER_ROW - row.length;
           if (padMeasures > 0) {
             cells.push(
               <div 
@@ -502,6 +498,7 @@ export function ChordChart({
           );
         })}
       </div>
+      )}
     </div>
   );
 }

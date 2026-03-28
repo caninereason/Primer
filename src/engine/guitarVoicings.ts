@@ -59,6 +59,180 @@ export function tabToMidiNotes(tab: GuitarTab, isDisplayOrder = false): string[]
   return notes;
 }
 
+/** Display-order tab: index 0 = high e … 5 = low E. Piano mirror columns map bass-left → low E … treble-right → high e. */
+export function displayStringNoteMidi(tab: GuitarTab, displayStringIndex: number): number | null {
+  const f = tab[displayStringIndex];
+  if (f == null) return null;
+  const physicalIndex = 5 - displayStringIndex;
+  if (physicalIndex < 0 || physicalIndex > 5) return null;
+  return PHYS_STRINGS[physicalIndex].midi + f;
+}
+
+/** If `midi` is playable on that display string, return fret 0–24; else null. */
+export function midiToFretOnDisplayString(midi: number, displayStringIndex: number): number | null {
+  if (displayStringIndex < 0 || displayStringIndex > 5) return null;
+  const physicalIndex = 5 - displayStringIndex;
+  const open = PHYS_STRINGS[physicalIndex].midi;
+  const fret = midi - open;
+  if (fret < 0 || fret > 24) return null;
+  return fret;
+}
+
+/** Sounding MIDI for `fret` on a display-order string (0 = high e … 5 = low E). */
+export function midiForDisplayStringFret(displayStringIndex: number, fret: number): number | null {
+  if (displayStringIndex < 0 || displayStringIndex > 5 || fret < 0 || fret > 24) return null;
+  const physicalIndex = 5 - displayStringIndex;
+  return PHYS_STRINGS[physicalIndex].midi + fret;
+}
+
+export type GuitarMirrorPick = { stringIndex: number; fret: number };
+
+/**
+ * Frets beside the current one on a string (±2), for piano mirror “areas”.
+ * Open (0) is included only when that string is open in the tab (`currentFret === 0`).
+ * Muted string: center on the visible fret window; still no open unless you’re on fret 0.
+ */
+export function neighborFretsForMirrorString(
+  currentFret: number | null,
+  fretWindow: { startFret: number; endFret: number },
+  neighborSpan = 2,
+): number[] {
+  const lo = Math.min(fretWindow.startFret, fretWindow.endFret);
+  const hi = Math.max(fretWindow.startFret, fretWindow.endFret);
+  const openInPos = currentFret === 0;
+
+  let center: number;
+  if (currentFret != null) {
+    center = currentFret;
+  } else {
+    center = Math.round((lo + hi) / 2);
+    center = Math.max(lo, Math.min(hi, center));
+  }
+
+  const out: number[] = [];
+  for (let d = -neighborSpan; d <= neighborSpan; d++) {
+    const f = center + d;
+    if (f < 0 || f > 24) continue;
+    if (f === 0 && !openInPos) continue;
+    out.push(f);
+  }
+
+  if (out.length === 0) {
+    const fb = Math.max(0, Math.min(24, currentFret ?? center));
+    if (fb === 0 && !openInPos) {
+      const alt = Math.max(1, Math.min(24, lo > 0 ? lo : 1));
+      return [alt];
+    }
+    return [fb];
+  }
+  return [...new Set(out)].sort((a, b) => a - b);
+}
+
+const MIRROR_STRING_COUNT = 6;
+const MIRROR_MAX_COMFORTABLE_STRETCH = 4;
+const MIRROR_PITCH_WEIGHT = 100;
+const MIRROR_MAX_STRETCH_COST = 40;
+
+function referenceFretForMirrorString(
+  d: number,
+  tab: (number | null)[],
+  win: { startFret: number; endFret: number },
+): number {
+  const f = tab[d];
+  if (f != null) return f;
+  const lo = Math.min(win.startFret, win.endFret);
+  const hi = Math.max(win.startFret, win.endFret);
+  return Math.max(0, Math.min(24, Math.round((lo + hi) / 2)));
+}
+
+export type ResolveGuitarMirrorPickArgs = {
+  /** Horizontal position for string-column hint (e.g. click X in host coords). */
+  centerX: number;
+  totalWidth: number;
+  clickedMidi: number;
+  chordTab: (number | null)[] | null | undefined;
+  fretWindow: { startFret: number; endFret: number };
+};
+
+/**
+ * Map a clicked MIDI + horizontal hint to (display string, fret), same rules as the compact piano
+ * in Draw mode: pitch match dominates; stretch from current tab is capped; column biases string.
+ */
+export function resolveGuitarMirrorPick(args: ResolveGuitarMirrorPickArgs): GuitarMirrorPick | null {
+  const { centerX, totalWidth, clickedMidi, chordTab, fretWindow } = args;
+  if (totalWidth <= 0) return null;
+  const tab: (number | null)[] =
+    chordTab && chordTab.length === 6
+      ? chordTab
+      : [null, null, null, null, null, null];
+  const win = fretWindow;
+
+  const refFret = Array.from({ length: MIRROR_STRING_COUNT }, (_, d) =>
+    referenceFretForMirrorString(d, tab, win),
+  );
+
+  const colW = totalWidth / MIRROR_STRING_COUNT;
+  const col = Math.min(MIRROR_STRING_COUNT - 1, Math.floor(centerX / colW));
+  const hintString = (MIRROR_STRING_COUNT - 1) - col;
+
+  const clickCh = ((clickedMidi % 12) + 12) % 12;
+
+  function stretchPenalty(gap: number): number {
+    if (gap < MIRROR_MAX_COMFORTABLE_STRETCH) return 0;
+    if (gap === MIRROR_MAX_COMFORTABLE_STRETCH) return 20;
+    return 85 + (gap - MIRROR_MAX_COMFORTABLE_STRETCH) * 14;
+  }
+
+  let bestD = hintString;
+  let bestF = 0;
+  let bestScore = Infinity;
+  let bestDist = Infinity;
+
+  for (let d = 0; d < MIRROR_STRING_COUNT; d++) {
+    for (let f = 0; f <= 24; f++) {
+      const m = midiForDisplayStringFret(d, f);
+      if (m == null) continue;
+      if (((m % 12) + 12) % 12 !== clickCh) continue;
+      const distRaw = Math.abs(m - clickedMidi);
+      const gap = Math.abs(f - refFret[d]!);
+      const stretch = Math.min(MIRROR_MAX_STRETCH_COST, stretchPenalty(gap));
+      const columnHint = d === hintString ? -15 : 0;
+      const score = distRaw * MIRROR_PITCH_WEIGHT + stretch + columnHint;
+      if (
+        score < bestScore ||
+        (score === bestScore && distRaw < bestDist) ||
+        (score === bestScore && distRaw === bestDist && d === hintString && bestD !== hintString) ||
+        (score === bestScore &&
+          distRaw === bestDist &&
+          (d === hintString) === (bestD === hintString) &&
+          f < bestF)
+      ) {
+        bestScore = score;
+        bestDist = distRaw;
+        bestD = d;
+        bestF = f;
+      }
+    }
+  }
+
+  if (bestScore < Infinity) return { stringIndex: bestD, fret: bestF };
+
+  const neigh = neighborFretsForMirrorString(tab[hintString] ?? null, win);
+  if (neigh.length === 0) return null;
+  let bf = neigh[0]!;
+  let br = Infinity;
+  for (const f of neigh) {
+    const m = midiForDisplayStringFret(hintString, f);
+    if (m == null) continue;
+    const r = Math.abs(m - clickedMidi);
+    if (r < br) {
+      br = r;
+      bf = f;
+    }
+  }
+  return { stringIndex: hintString, fret: bf };
+}
+
 /**
  * Count clusters of adjacent strings at each distinct fret.
  * Adjacent strings at the same fret can share one finger (mini-barre).

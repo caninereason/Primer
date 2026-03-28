@@ -21,7 +21,7 @@ export const VOICING_OPTIONS: { value: VoicingType; label: string }[] = [
   { value: 'quartal', label: '4. Quartal' },
   { value: 'spread', label: '5. Spread (Evans)' },
   { value: 'upper-structure', label: '6. Upper Structure' },
-  { value: 'guitar', label: '7. Guitar (Mirror)' },
+  { value: 'guitar', label: '7. Guitar (Draw)' },
 ];
 
 export interface VoicingResult {
@@ -293,9 +293,10 @@ export function computeGuitarPositions(rootChroma: number): GuitarPosition[] {
   defs.sort((a, b) => a.center - b.center);
 
   const maxFret = 24;
+  // At most 5 inclusive fret columns (matches App FRETBOARD_MAX_POSITION_FRETS).
   return defs.map((d, i) => ({
     label: `Pos ${i + 1}`,
     startFret: Math.max(0, d.start - 1),
-    endFret: Math.min(d.start + 4, maxFret),
+    endFret: Math.min(d.start + 3, maxFret),
   }));
 }

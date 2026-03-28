@@ -46,6 +46,81 @@ export function normalizeNotes(notes: string[]): string[] {
   return notes.map(normalizeNote);
 }
 
+/**
+ * Same compact voicing as the piano roll "chord all" mode (≤6 pitch classes, or explicit MIDIs e.g. from guitar mirror).
+ * Root anchors spelling around octave 4+.
+ */
+export function buildChordMidis(
+  notes: string[],
+  rootNote: string,
+): { midis: Set<number>; names: Map<number, string> } | null {
+  const rootCh = Note.chroma(rootNote);
+  if (rootCh == null) return null;
+
+  const startMidi = (4 + 1) * 12 + rootCh;
+  const midis = new Set<number>();
+  const names = new Map<number, string>();
+
+  for (const n of notes) {
+    const ch = Note.chroma(n);
+    if (ch == null) continue;
+
+    const m = Note.midi(n);
+    if (m != null) {
+      midis.add(m);
+      names.set(m, n.replace(/\d+$/, ''));
+      continue;
+    }
+
+    let midi = (4 + 1) * 12 + ch;
+    if (midi < startMidi) midi += 12;
+    midis.add(midi);
+    names.set(midi, n);
+  }
+  return { midis, names };
+}
+
+/**
+ * Re-spell a note to match the pitch-class spelling used in `chartNotes` (same chroma),
+ * keeping the octave from `noteWithOctave`. Keeps staff / marks aligned with piano labels.
+ */
+export function spellLikeChordChart(noteWithOctave: string, chartNotes: string[]): string {
+  const g = Note.get(noteWithOctave);
+  if (g.empty) return normalizeNote(noteWithOctave);
+  const ch = Note.chroma(noteWithOctave);
+  if (ch == null) return normalizeNote(noteWithOctave);
+  const model = chartNotes.find(n => Note.chroma(n) === ch);
+  if (!model) return normalizeNote(noteWithOctave);
+  const pc = model.replace(/\d+$/, '');
+  const oct = g.oct;
+  if (oct == null) return normalizeNote(pc);
+  const candidate = `${pc}${oct}`;
+  return Note.midi(candidate) != null ? normalizeNote(candidate) : normalizeNote(noteWithOctave);
+}
+
+/** Spelled note strings (with octaves), sorted low→high, matching the piano roll chord-all voicing. */
+export function spellChordNotesLikePianoRoll(allNotes: string[], rootNote: string): string[] {
+  const built = buildChordMidis(allNotes, rootNote);
+  if (!built || built.midis.size === 0) {
+    return assignOctaves(allNotes.map(n => n.replace(/\d+$/, '')));
+  }
+  return [...built.midis]
+    .sort((a, b) => a - b)
+    .map(m => {
+      const withOct = Note.fromMidi(m);
+      if (!withOct) return null;
+      const pcFromChord = built.names.get(m);
+      if (pcFromChord) {
+        const o = Note.get(withOct).oct;
+        if (o == null) return normalizeNote(withOct);
+        const candidate = `${pcFromChord}${o}`;
+        return Note.midi(candidate) != null ? normalizeNote(candidate) : normalizeNote(withOct);
+      }
+      return normalizeNote(withOct);
+    })
+    .filter((n): n is string => n != null);
+}
+
 export function assignOctaves(notes: string[], startOctave = 4): string[] {
   if (notes.length === 0) return [];
 
@@ -69,11 +144,61 @@ export function assignOctaves(notes: string[], startOctave = 4): string[] {
   });
 }
 
+/**
+ * Vex StaveNote key (`c#/4`, `dbb/5`, etc.). Match `bb`/`##` before single `b`/`#`.
+ */
 export function noteToVexKey(note: string): { key: string; accidental?: string } {
-  const match = note.match(/^([A-G])(b|#)?(\d)$/);
+  const n = normalizeNote(note);
+  const match = n.match(/^([A-G])(bb|##|b|#)?(\d)$/);
   if (!match) return { key: 'b/4' };
 
   const [, letter, acc, octave] = match;
-  const key = `${letter.toLowerCase()}${acc || ''}/${octave}`;
-  return { key, accidental: acc };
+  const key = `${letter.toLowerCase()}${acc ?? ''}/${octave}`;
+  return { key, accidental: acc || undefined };
+}
+
+/** Matches `PianoRoll` / App compact keyboard (octaves 2–5). */
+export const COMPACT_PIANO_ROLL_MIDIS: readonly number[] = (() => {
+  const OCTAVES = [2, 3, 4, 5];
+  const WHITE_NAMES = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+  const BLACK_AFTER = ['C', 'D', 'F', 'G', 'A'];
+  const midis: number[] = [];
+  for (const oct of OCTAVES) {
+    for (const wn of WHITE_NAMES) {
+      const ch = Note.chroma(wn)!;
+      const midi = (oct + 1) * 12 + ch;
+      midis.push(midi);
+      if (BLACK_AFTER.includes(wn)) {
+        const bch = (ch + 1) % 12;
+        midis.push((oct + 1) * 12 + bch);
+      }
+    }
+  }
+  return midis;
+})();
+
+/** Same chroma as `midi`, nearest key on the compact piano roll (fixes guitar open-string octaves vs keyboard). */
+export function snapMidiToCompactPianoRoll(midi: number): number {
+  const ch = ((midi % 12) + 12) % 12;
+  let best = COMPACT_PIANO_ROLL_MIDIS[0] ?? midi;
+  let bestD = Infinity;
+  for (const k of COMPACT_PIANO_ROLL_MIDIS) {
+    if (((k % 12) + 12) % 12 !== ch) continue;
+    const d = Math.abs(k - midi);
+    if (d < bestD) {
+      bestD = d;
+      best = k;
+    }
+  }
+  return best;
+}
+
+/** Map guitar / analysis notes (any octave) onto keys that exist on the compact piano. */
+export function mapNotesToCompactPianoRollKeyboard(noteStrings: string[]): string[] {
+  return noteStrings.map(n => {
+    const m = Note.midi(n);
+    if (m == null) return n;
+    const s = snapMidiToCompactPianoRoll(m);
+    return Note.fromMidi(s) ?? n;
+  });
 }

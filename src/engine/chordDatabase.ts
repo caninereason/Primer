@@ -186,14 +186,16 @@ export function getChordNotes(symbol: string): string[] {
 }
 
 /**
- * True if physical tab [low E…high e] has ≥3 strings sounding, every pitch is a chord tone,
- * and the chord root pitch class appears on at least one string.
+ * True if physical tab [low E…high e] has ≥3 strings sounding and every pitch is a chord tone.
+ * By default the chord root must appear on the fretboard; set `requireRootOnFretboard: false` when the
+ * displayed shape omits the root (e.g. after display-only filtering).
  * @param fallbackNotes when getChordNotes(symbol) is empty (exotic spellings), use these (e.g. chart/library notes).
  */
 export function tabMatchesChordSymbol(
   tabPhysical: GuitarTab,
   chordSymbol: string,
   fallbackNotes?: string[],
+  options?: { requireRootOnFretboard?: boolean },
 ): boolean {
   let chordNotes = getChordNotes(chordSymbol);
   if (chordNotes.length === 0 && fallbackNotes && fallbackNotes.length > 0) {
@@ -212,6 +214,8 @@ export function tabMatchesChordSymbol(
     if (!chordChromas.has(c)) return false;
     tabChromas.push(c);
   }
+  const requireRootOnFretboard = options?.requireRootOnFretboard !== false;
+  if (!requireRootOnFretboard) return true;
   const rootMatch = chordSymbol.match(/^([A-G][b#]?)/);
   const rootCh = rootMatch ? Note.chroma(rootMatch[1]) : null;
   if (rootCh != null && !tabChromas.includes(rootCh)) return false;

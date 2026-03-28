@@ -1,10 +1,28 @@
-import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import type { MouseEvent } from 'react';
 import { Note, Chord, Scale } from 'tonal';
 import type { Song, Measure, ChordInfo, ScaleSuggestion, KeyAnalysis } from './types/music';
 import { getScalesForChord } from './engine/scaleEngine';
 import { getScaleRelation } from './engine/scaleRelations';
 import { analyzeKey } from './engine/keyAnalyzer';
-import { assignOctaves, normalizeNotes } from './engine/noteUtils';
+import {
+  assignOctaves,
+  buildChordMidis,
+  COMPACT_PIANO_ROLL_MIDIS,
+  mapNotesToCompactPianoRollKeyboard,
+  normalizeNotes,
+  snapMidiToCompactPianoRoll,
+  spellChordNotesLikePianoRoll,
+  spellLikeChordChart,
+} from './engine/noteUtils';
+import {
+  mergeHarmonyNoteStrings,
+  mergeStaffWithScratch,
+  normalizeStaffScratchSpelling,
+  scratchApplyAccidental,
+  type StaffScratchEntry,
+} from './engine/staffScratchAccidentals';
+import { spellPitchOnStaffInKey } from './engine/staffKey';
 import { DEMO_SONGS } from './engine/demoData';
 import { parseIRealData } from './engine/iRealParser';
 import {
@@ -15,7 +33,15 @@ import {
   VOICING_OPTIONS,
   type VoicingType,
 } from './engine/voicingEngine';
-import { generatePlayableVoicings, filterTabNotesAtOrAboveRoot, tabToMidiNotes, type GuitarTab } from './engine/guitarVoicings';
+import {
+  generatePlayableVoicings,
+  filterTabNotesAtOrAboveRoot,
+  midiForDisplayStringFret,
+  resolveGuitarMirrorPick,
+  tabToMidiNotes,
+  type GuitarMirrorPick,
+  type GuitarTab,
+} from './engine/guitarVoicings';
 import { buildDegreeColorMap } from './engine/degreeColors';
 import { ChordPlayer, type RepeatMark } from './engine/player';
 import { Header } from './components/Header';
@@ -54,8 +80,46 @@ const BASS_OPEN_MIDIS = [43, 38, 33, 28] as const;
 
 /** Click the Guitar mode button this many times (while using the app) to reveal Save Default + neck-shift arrows. */
 const GUITAR_CHORD_TOOLS_REVEAL_CLICKS = 5;
-/** Chord voicings and highlights stay within frets 0…this (scale mode can use the full neck). */
+/** Chord voicings and highlights stay within frets 0…this (per-position view). */
 const GUITAR_CHORD_MAX_FRET = 14;
+
+function uniquePitchClassNoteStrings(midis: Iterable<number>): string[] {
+  const byChroma = new Map<number, string>();
+  const sorted = [...midis].filter(m => m >= 0 && m <= 127).sort((a, b) => a - b);
+  for (const m of sorted) {
+    const n = Note.fromMidi(m);
+    if (!n) continue;
+    const ch = Note.chroma(n);
+    if (ch == null) continue;
+    if (!byChroma.has(ch)) byChroma.set(ch, n);
+  }
+  return [...byChroma.values()];
+}
+
+function mergeNoteStringsUniqueByChroma(a: string[], b: string[]): string[] {
+  const byChroma = new Map<number, string>();
+  for (const n of [...a, ...b]) {
+    const ch = Note.chroma(n);
+    if (ch == null) continue;
+    if (!byChroma.has(ch)) byChroma.set(ch, n);
+  }
+  return [...byChroma.values()];
+}
+/** Guitar "All" position: show one octave of frets (nut through 12). */
+const GUITAR_ALL_POSITION_END_FRET = 12;
+
+/** localStorage: canonical chord symbol → preferred Pos index (0…4) when opening that chord from the chart. */
+const CHART_GUITAR_DEFAULT_POS_KEY = 'primer-chart-guitar-default-pos';
+
+function findFirstBarreIndex(tabs: GuitarTab[]): number {
+  const barreIdx = tabs.findIndex((tab) => {
+    const frets = tab.filter((f): f is number => f != null && f > 0);
+    const counts: Record<number, number> = {};
+    frets.forEach((f) => (counts[f] = (counts[f] || 0) + 1));
+    return Object.values(counts).some((c) => c >= 3);
+  });
+  return barreIdx >= 0 ? barreIdx : 0;
+}
 
 /**
  * High voicings can have min fret > 14 while endFret is capped — that made startFret > endFret and the
@@ -72,6 +136,49 @@ function clampGuitarChordViewRange(startFret: number, endFret: number, maxFret: 
     e = maxFret;
   }
   return { startFret: s, endFret: Math.max(s, e) };
+}
+
+/** P1/P2/P3 (not "All"): at most this many fret columns inclusive. */
+const FRETBOARD_MAX_POSITION_FRETS = 5;
+
+function clampFretWindowToSpan(
+  startFret: number,
+  endFret: number,
+  maxInclusive: number,
+  maxFretCap: number,
+): { startFret: number; endFret: number } {
+  let s = Math.max(0, Math.min(startFret, endFret));
+  let e = Math.min(maxFretCap, Math.max(startFret, endFret));
+  if (e - s + 1 <= maxInclusive) return { startFret: s, endFret: e };
+  e = s + maxInclusive - 1;
+  if (e > maxFretCap) {
+    e = maxFretCap;
+    s = Math.max(0, e - maxInclusive + 1);
+  }
+  return { startFret: s, endFret: e };
+}
+
+/** Grow visible [s,e] so every sounding fret in `tab` is on the diagram (up to `cap`). */
+function mergeGuitarTabIntoFretWindow(
+  tab: (number | null)[] | null,
+  startFret: number,
+  endFret: number,
+  cap: number,
+): { startFret: number; endFret: number } {
+  if (!tab || tab.length !== 6) return { startFret, endFret };
+  let tMin: number | null = null;
+  let tMax: number | null = null;
+  for (const f of tab) {
+    if (f == null) continue;
+    tMin = tMin === null ? f : Math.min(tMin, f);
+    tMax = tMax === null ? f : Math.max(tMax, f);
+  }
+  if (tMin == null || tMax == null) return { startFret, endFret };
+  let s = Math.min(startFret, tMin);
+  let e = Math.max(endFret, tMax);
+  s = Math.max(0, s);
+  e = Math.min(cap, Math.max(e, s));
+  return { startFret: s, endFret: e };
 }
 
 function chordFretRangeFromPressedBounds(
@@ -93,10 +200,15 @@ function bassChordRootReferenceMidi(root: string): number | null {
 }
 
 const BASS_POSITIONS = [
-  { label: 'P1', startFret: 0, endFret: 5 },
-  { label: 'P2', startFret: 4, endFret: 9 },
-  { label: 'P3', startFret: 8, endFret: 14 },
+  { label: 'P1', startFret: 0, endFret: 4 },
+  { label: 'P2', startFret: 4, endFret: 8 },
+  { label: 'P3', startFret: 8, endFret: 12 },
 ] as const;
+
+/** Bass "All": full visible neck (same idea as guitar All). */
+const BASS_ALL_FRET_RANGE = { label: 'All', startFret: 0, endFret: 16 } as const;
+
+type BassPositionIdx = -1 | 0 | 1 | 2;
 
 /** Visible fretboard right edge for guitar (positions + All). */
 const GUITAR_NECK_END_FRET = 24;
@@ -156,7 +268,7 @@ export default function App() {
   const [expandedInstrument, setExpandedInstrument] = useState<InstrumentId | null>(null);
   const [collapsedInstruments, setCollapsedInstruments] = useState<Set<InstrumentId>>(new Set());
   const [fretboardInstrument, setFretboardInstrument] = useState<FretboardInstrument>('guitar');
-  const [bassPosition, setBassPosition] = useState<0 | 1 | 2>(0);
+  const [bassPosition, setBassPosition] = useState<BassPositionIdx>(0);
   const [guitarVoicingVariant, setGuitarVoicingVariant] = useState(0);
   const [transposeSemitones, setTransposeSemitones] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -166,6 +278,21 @@ export default function App() {
   const [bassOn, setBassOn] = useState(true);
   const [swingPercent, setSwingPercent] = useState(50);
   const [showStaffNoteNames, setShowStaffNoteNames] = useState(true);
+  /** Grand staff: bass (F) clef below treble; default off. */
+  const [showStaffBassClef, setShowStaffBassClef] = useState(false);
+  /** User-placed notes on the staff (click to add; NESW to edit). */
+  const [staffScratch, setStaffScratch] = useState<StaffScratchEntry[]>([]);
+  /** Chart/voicing midis hidden after removing the scratch row that replaced them. */
+  const [staffOmittedMidis, setStaffOmittedMidis] = useState<Set<number>>(() => new Set());
+  /** Pitch classes hidden on staff when piano uses chroma-level dim (7+ note chords). */
+  const [staffOmittedChromas, setStaffOmittedChromas] = useState<Set<number>>(() => new Set());
+  const [selectedStaffScratchId, setSelectedStaffScratchId] = useState<string | null>(null);
+  /** Piano key to ring when pointer maps to a staff line (same MIDI as compact roll). */
+  const [staffHoverMidi, setStaffHoverMidi] = useState<number | null>(null);
+  /** Pitch-class label for hover (matches chord chart spelling, not `Note.fromMidi` default). */
+  const [staffHoverPitchClass, setStaffHoverPitchClass] = useState<string | null>(null);
+  const [showPianoNoteNames, setShowPianoNoteNames] = useState(true);
+  const [showGuitarFretNoteNames, setShowGuitarFretNoteNames] = useState(true);
   /** When true, show pitch-class names on ghost + played dots (each string/fret labeled). */
   const [showBassAllNoteNames, setShowBassAllNoteNames] = useState(false);
   /** Guitar: extend visible end fret after clicking a fret (e.g. click 12 → show 13). */
@@ -184,6 +311,9 @@ export default function App() {
   const [editableGuitarTab, setEditableGuitarTab] = useState<(number | null)[] | null>(null);
   const [mirrorGuitarToPiano, setMirrorGuitarToPiano] = useState(false);
   const [tappedMidis, setTappedMidis] = useState<Set<number>>(new Set());
+  /** Piano keys dimmed by click (chord/voicing highlights); cleared with chord / chart clear. */
+  const [pianoOmittedMidis, setPianoOmittedMidis] = useState<Set<number>>(() => new Set());
+  const [pianoOmittedChromas, setPianoOmittedChromas] = useState<Set<number>>(() => new Set());
   const [tappedGuitarTab, setTappedGuitarTab] = useState<(number | null)[] | null>(null);
   const [liveBassNote, setLiveBassNote] = useState<string | null>(null);
   const [liveBassMidi, setLiveBassMidi] = useState<number | null>(null);
@@ -194,13 +324,6 @@ export default function App() {
   const guitarPosFooterRef = useRef<HTMLDivElement | null>(null);
   /** Collapsed card: width of fretboard column (between ◀ ▶), for fitting All/P1… below */
   const guitarFretboardBoardRef = useRef<HTMLDivElement | null>(null);
-  /** Hidden row matching pill buttons — measured width vs board for hamburger */
-  const guitarPillsMeasureRowRef = useRef<HTMLDivElement | null>(null);
-  const fretboardCompactEnterWidthRef = useRef(0);
-  const prevFretboardInstrumentRef = useRef<FretboardInstrument | null>(null);
-  const posNavMenuWrapRef = useRef<HTMLDivElement | null>(null);
-  const [fretboardPosCompact, setFretboardPosCompact] = useState(false);
-  const [fretboardPosMenuOpen, setFretboardPosMenuOpen] = useState(false);
 
   const playerRef = useRef<ChordPlayer | null>(null);
   if (!playerRef.current) playerRef.current = new ChordPlayer();
@@ -345,31 +468,13 @@ export default function App() {
     return computeVoicing(selectedChord.symbol, voicingType);
   }, [selectedChord, selectedScale, voicingType]);
 
-  const staffNotes = useMemo(() => {
-    if (selectedScale) return assignOctaves(selectedScale.notes);
-    if (voicing) {
-      const all = [...voicing.leftHand, ...voicing.rightHand];
-      all.sort((a, b) => (Note.midi(a) || 0) - (Note.midi(b) || 0));
-      return all;
-    }
-    const notes = selectedChord?.notes ?? [];
-    if (notes.length > 0) return assignOctaves(notes);
-    return [];
-  }, [selectedChord, selectedScale, voicing]);
-
   const staffMode: 'chord' | 'scale' | 'empty' = selectedScale
     ? 'scale'
     : selectedChord
       ? 'chord'
       : 'empty';
 
-  const staffLabel = selectedScale
-    ? selectedScale.name
-    : selectedChord
-      ? voicingType !== 'all'
-        ? `${selectedChord.symbol} — ${VOICING_OPTIONS.find(o => o.value === voicingType)?.label || ''}`
-        : selectedChord.symbol
-      : '';
+  const staffLabel = selectedScale ? selectedScale.name : selectedChord ? selectedChord.symbol : '';
 
   const displayNotes = useMemo(() => {
     if (fretboardInstrument === 'bass') {
@@ -405,6 +510,21 @@ export default function App() {
     } catch (err) { console.error('[ChordLoad] LocalStorage error:', err); }
     return null;
   });
+
+  const [chartGuitarDefaultPos, setChartGuitarDefaultPos] = useState<Record<string, number>>(() => {
+    try {
+      const raw =
+        typeof localStorage !== 'undefined' ? localStorage.getItem(CHART_GUITAR_DEFAULT_POS_KEY) : null;
+      if (raw) {
+        const data = JSON.parse(raw) as Record<string, number>;
+        if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+      }
+    } catch (_) {}
+    return {};
+  });
+
+  const lastChartChordNavKeyRef = useRef('');
+  const prevShowLibraryForChartNavRef = useRef(showLibrary);
 
   useEffect(() => {
     fetch('/api/custom-chords')
@@ -448,26 +568,29 @@ export default function App() {
         const frets = tab.filter((f): f is number => f != null && f >= 0);
         const minF = frets.length ? Math.min(...frets) : 0;
         const maxF = frets.length ? Math.max(...frets) : 4;
-        const { startFret, endFret } = chordFretRangeFromPressedBounds(
-          minF,
-          maxF,
-          GUITAR_CHORD_MAX_FRET,
-        );
-        return { label: `Pos ${i + 1}`, startFret, endFret };
+        const r = chordFretRangeFromPressedBounds(minF, maxF, GUITAR_CHORD_MAX_FRET);
+        return {
+          label: `Pos ${i + 1}`,
+          ...clampFretWindowToSpan(r.startFret, r.endFret, FRETBOARD_MAX_POSITION_FRETS, GUITAR_CHORD_MAX_FRET),
+        };
       });
     }
     const base = computeGuitarPositions(ch);
     if (fretboardMode === 'chord') {
-      return base.map((p) => ({
-        label: p.label,
-        ...clampGuitarChordViewRange(p.startFret, p.endFret, GUITAR_CHORD_MAX_FRET),
-      }));
+      return base.map((p) => {
+        const r = clampGuitarChordViewRange(p.startFret, p.endFret, GUITAR_CHORD_MAX_FRET);
+        return {
+          label: p.label,
+          ...clampFretWindowToSpan(r.startFret, r.endFret, FRETBOARD_MAX_POSITION_FRETS, GUITAR_CHORD_MAX_FRET),
+        };
+      });
     }
     return base;
   }, [displayRoot, fretboardMode, dbShapes, dbShapeLabels]);
 
   const fretRange = useMemo(() => {
     if (fretboardInstrument === 'bass') {
+      if (bassPosition === -1) return BASS_ALL_FRET_RANGE;
       return BASS_POSITIONS[bassPosition];
     }
     if (guitarPosition >= 0 && guitarPositions[guitarPosition])
@@ -475,9 +598,7 @@ export default function App() {
     return {
       startFret: 0,
       endFret:
-        fretboardInstrument === 'guitar' && fretboardMode === 'chord'
-          ? GUITAR_CHORD_MAX_FRET
-          : GUITAR_NECK_END_FRET,
+        fretboardInstrument === 'guitar' ? GUITAR_ALL_POSITION_END_FRET : GUITAR_NECK_END_FRET,
       label: 'All',
     };
   }, [guitarPosition, guitarPositions, fretboardInstrument, bassPosition, fretboardMode]);
@@ -486,44 +607,40 @@ export default function App() {
     setGuitarPeekEndExtend(null);
   }, [fretboardInstrument, guitarPosition, fretRange.startFret, fretRange.endFret]);
 
+  /** Chord mode: Pos 1…5 cap at 14; "All" caps at 12. */
+  const guitarChordNeckCap = useMemo(() => {
+    if (fretboardInstrument !== 'guitar' || fretboardMode !== 'chord') {
+      return GUITAR_CHORD_MAX_FRET;
+    }
+    return guitarPosition < 0 ? GUITAR_ALL_POSITION_END_FRET : GUITAR_CHORD_MAX_FRET;
+  }, [fretboardInstrument, fretboardMode, guitarPosition]);
+
   const guitarChordFretWindow = useMemo(() => {
     if (fretboardInstrument !== 'guitar' || fretboardMode !== 'chord') return null;
+    const cap = guitarChordNeckCap;
     const a = fretRange.startFret;
     const b = fretRange.endFret;
     let s = a + guitarChordViewPan;
     let e = b + guitarChordViewPan;
-    if (e > GUITAR_CHORD_MAX_FRET) {
-      s = Math.max(0, s - (e - GUITAR_CHORD_MAX_FRET));
-      e = GUITAR_CHORD_MAX_FRET;
+    if (e > cap) {
+      s = Math.max(0, s - (e - cap));
+      e = cap;
     }
     if (s < 0) {
-      e = Math.min(GUITAR_CHORD_MAX_FRET, e - s);
+      e = Math.min(cap, e - s);
       s = 0;
     }
-    return clampGuitarChordViewRange(s, e, GUITAR_CHORD_MAX_FRET);
-  }, [fretboardInstrument, fretboardMode, fretRange.startFret, fretRange.endFret, guitarChordViewPan]);
-
-  const guitarDisplayStartFret =
-    fretboardInstrument === 'guitar' && fretboardMode === 'chord' && guitarChordFretWindow != null
-      ? guitarChordFretWindow.startFret
-      : fretRange.startFret;
-
-  const guitarDisplayEndFret = useMemo(() => {
-    if (fretboardInstrument !== 'guitar') return fretRange.endFret;
-    const baseEnd =
-      fretboardMode === 'chord' && guitarChordFretWindow != null
-        ? guitarChordFretWindow.endFret
-        : fretRange.endFret;
-    let end = baseEnd;
-    if (guitarPeekEndExtend != null) end = Math.max(end, guitarPeekEndExtend);
-    if (fretboardMode === 'chord') end = Math.min(end, GUITAR_CHORD_MAX_FRET);
-    return end;
+    const r = clampGuitarChordViewRange(s, e, cap);
+    if (guitarPosition < 0) return r;
+    return clampFretWindowToSpan(r.startFret, r.endFret, FRETBOARD_MAX_POSITION_FRETS, cap);
   }, [
     fretboardInstrument,
     fretboardMode,
-    guitarChordFretWindow,
+    guitarPosition,
+    fretRange.startFret,
     fretRange.endFret,
-    guitarPeekEndExtend,
+    guitarChordViewPan,
+    guitarChordNeckCap,
   ]);
 
   const bassFretDotLabel = useCallback(
@@ -543,12 +660,15 @@ export default function App() {
     [displayRoot, showBassAllNoteNames],
   );
 
-  const handleGuitarFretPeek = useCallback((fret: number) => {
-    setGuitarPeekEndExtend((prev) => {
-      const next = Math.max(prev ?? 0, fret + 1);
-      return fretboardMode === 'chord' ? Math.min(next, GUITAR_CHORD_MAX_FRET) : next;
-    });
-  }, [fretboardMode]);
+  const handleGuitarFretPeek = useCallback(
+    (fret: number) => {
+      setGuitarPeekEndExtend((prev) => {
+        const next = Math.max(prev ?? 0, fret + 1);
+        return fretboardMode === 'chord' ? Math.min(next, guitarChordNeckCap) : next;
+      });
+    },
+    [fretboardMode, guitarChordNeckCap],
+  );
 
   const playableVoicings = useMemo(() => {
     if (fretboardMode !== 'chord' || guitarPosition < 0 || !displayRoot) return [];
@@ -570,52 +690,24 @@ export default function App() {
     const raw = playableVoicings[idx];
     // Library chord editor: don't strip notes below root — that diverges from saved/db shapes and
     // the sync effect would overwrite the board right after Save Default.
-    const inLibraryChordEdit =
-      showLibrary && fretboardMode === 'chord' && selectedChord && guitarPosition >= 0;
+    const inChordShapeEdit =
+      fretboardMode === 'chord' &&
+      selectedChord &&
+      guitarPosition >= 0 &&
+      (showLibrary || guitarChordToolsUnlocked);
     const filtered =
-      !inLibraryChordEdit && rootCh != null ? filterTabNotesAtOrAboveRoot(raw, rootCh) : raw;
+      !inChordShapeEdit && rootCh != null ? filterTabNotesAtOrAboveRoot(raw, rootCh) : raw;
     return filtered.slice().reverse();
   }, [
     playableVoicings,
     guitarVoicingVariant,
     displayRoot,
     showLibrary,
+    guitarChordToolsUnlocked,
     fretboardMode,
     selectedChord,
     guitarPosition,
   ]);
-
-  const interactiveAnalysis = useMemo(() => {
-    let notes: string[] = [];
-    if (mirrorGuitarToPiano) {
-      // Union of both sets
-      const pNotes = Array.from(tappedMidis).map(m => Note.fromMidi(m)).filter((n): n is string => n != null);
-      const gNotes = tappedGuitarTab ? tabToMidiNotes(tappedGuitarTab, true) : [];
-      notes = [...new Set([...pNotes, ...gNotes])];
-    } else {
-      // Pick the active one
-      if (tappedMidis.size > 0) {
-        notes = Array.from(tappedMidis).map(m => Note.fromMidi(m)).filter((n): n is string => n != null);
-      } else if (tappedGuitarTab) {
-        notes = tabToMidiNotes(tappedGuitarTab, true);
-      }
-    }
-
-    if (notes.length === 0) return { library: [], theory: [] };
-    const libMatches = detectLibraryChords(notes);
-    const theoryMatches = Chord.detect(notes).filter((c: string) => !libMatches.includes(c));
-    return { library: libMatches, theory: theoryMatches };
-  }, [tappedMidis, tappedGuitarTab, mirrorGuitarToPiano]);
-
-  const handleTogglePianoNote = useCallback((midi: number) => {
-    setTappedMidis(prev => {
-      const next = new Set(prev);
-      if (next.has(midi)) next.delete(midi);
-      else if (next.size < 12) next.add(midi);
-      if (!mirrorGuitarToPiano && tappedGuitarTab) setTappedGuitarTab(null);
-      return next;
-    });
-  }, [tappedGuitarTab, mirrorGuitarToPiano]);
 
   const handleToggleGuitarFret = useCallback((si: number, fret: number | null) => {
     setTappedGuitarTab(prev => {
@@ -623,16 +715,19 @@ export default function App() {
       if (next[si] === fret) next[si] = null;
       else next[si] = fret;
 
-      // Condition: only clear mirror if toggle is OFF
-      if (!mirrorGuitarToPiano && tappedMidis.size > 0) setTappedMidis(new Set());
+      if (tappedMidis.size > 0) setTappedMidis(new Set());
 
       return next;
     });
-  }, [guitarChordTab, tappedMidis, mirrorGuitarToPiano]);
+  }, [guitarChordTab, tappedMidis]);
 
   useEffect(() => {
     setTappedMidis(new Set());
     setTappedGuitarTab(null);
+    setPianoOmittedMidis(new Set());
+    setPianoOmittedChromas(new Set());
+    setStaffOmittedMidis(new Set());
+    setStaffOmittedChromas(new Set());
   }, [selectedChord?.symbol, selectedScale?.name, voicingType, guitarPosition, guitarVoicingVariant]);
 
   const chromaColorMap = useMemo(() => {
@@ -640,17 +735,13 @@ export default function App() {
     return buildDegreeColorMap(displayRoot, activeDegrees);
   }, [activeDegrees, displayRoot]);
 
-  const staffNoteColors = useMemo(() => {
-    if (!chromaColorMap || staffNotes.length === 0) return undefined;
-    return staffNotes.map(n => {
-      const ch = Note.chroma(n);
-      return ch != null ? chromaColorMap.get(ch) : undefined;
-    });
-  }, [staffNotes, chromaColorMap]);
-
   const guitarMaxVariants = Math.max(playableVoicings.length, 1);
 
-  const isFretboardEditable = showLibrary && fretboardMode === 'chord' && selectedChord && guitarPosition >= 0;
+  const isFretboardEditable =
+    fretboardMode === 'chord' &&
+    selectedChord &&
+    guitarPosition >= 0 &&
+    (showLibrary || guitarChordToolsUnlocked);
   const displayChordTab = isFretboardEditable && editableGuitarTab != null
     ? editableGuitarTab
     : guitarChordTab;
@@ -662,11 +753,65 @@ export default function App() {
         ? editableGuitarTab ?? guitarChordTab
         : tappedGuitarTab || displayChordTab;
 
+  /** Final visible frets; widened to include all tab frets and enough span (not stuck at 5) when needed. */
+  const clippedFretboardRange = useMemo(() => {
+    if (fretboardInstrument === 'guitar') {
+      const isAll = guitarPosition < 0;
+      let s =
+        fretboardMode === 'chord' && guitarChordFretWindow != null
+          ? guitarChordFretWindow.startFret
+          : fretRange.startFret;
+      let e =
+        fretboardMode === 'chord' && guitarChordFretWindow != null
+          ? guitarChordFretWindow.endFret
+          : fretRange.endFret;
+      if (guitarPeekEndExtend != null) e = Math.max(e, guitarPeekEndExtend);
+      if (fretboardMode === 'chord') e = Math.min(e, guitarChordNeckCap);
+      const cap = fretboardMode === 'chord' ? guitarChordNeckCap : GUITAR_CHORD_MAX_FRET;
+      const tabForStretch = fretboardMode === 'chord' ? guitarChordTabForFretboard : null;
+      const merged = mergeGuitarTabIntoFretWindow(tabForStretch, s, e, cap);
+      s = merged.startFret;
+      e = merged.endFret;
+      if (isAll) return { startFret: s, endFret: e };
+      const spanNeeded = e - s + 1;
+      const maxSpan = Math.max(FRETBOARD_MAX_POSITION_FRETS, spanNeeded);
+      return clampFretWindowToSpan(s, e, maxSpan, cap);
+    }
+    if (fretboardInstrument === 'bass') {
+      if (bassPosition < 0) return { startFret: fretRange.startFret, endFret: fretRange.endFret };
+      return clampFretWindowToSpan(
+        fretRange.startFret,
+        fretRange.endFret,
+        FRETBOARD_MAX_POSITION_FRETS,
+        BASS_ALL_FRET_RANGE.endFret,
+      );
+    }
+    return { startFret: fretRange.startFret, endFret: fretRange.endFret };
+  }, [
+    fretboardInstrument,
+    guitarPosition,
+    bassPosition,
+    fretboardMode,
+    guitarChordFretWindow,
+    fretRange.startFret,
+    fretRange.endFret,
+    guitarPeekEndExtend,
+    guitarChordNeckCap,
+    guitarChordTabForFretboard,
+  ]);
+
   const pianoNotes = useMemo(() => {
-    if (mirrorGuitarToPiano && displayChordTab) {
-      // Physical tab is [high e ... low E] from fretboard, but tabToMidiNotes expects [low E ... high e]
-      const midiNotes = tabToMidiNotes([...displayChordTab].reverse());
-      return { all: midiNotes, lh: [] as string[], rh: [] as string[] };
+    if (mirrorGuitarToPiano && fretboardInstrument === 'guitar') {
+      const tab = guitarChordTabForFretboard ?? displayChordTab;
+      if (tab && tab.length === 6) {
+        const midiNotes = tabToMidiNotes(tab, true);
+        const onKeyboard = mapNotesToCompactPianoRollKeyboard(midiNotes);
+        const all =
+          displayRoot != null
+            ? spellChordNotesLikePianoRoll(onKeyboard, displayRoot)
+            : onKeyboard;
+        return { all, lh: [] as string[], rh: [] as string[] };
+      }
     }
     if (selectedScale)
       return { all: selectedScale.notes, lh: [] as string[], rh: [] as string[] };
@@ -683,7 +828,694 @@ export default function App() {
       return { all: selectedChord.notes, lh: [] as string[], rh: [] as string[] };
     }
     return { all: [] as string[], lh: [] as string[], rh: [] as string[] };
-  }, [selectedScale, selectedChord, voicing, mirrorGuitarToPiano, displayChordTab]);
+  }, [
+    selectedScale,
+    selectedChord,
+    voicing,
+    mirrorGuitarToPiano,
+    fretboardInstrument,
+    guitarChordTabForFretboard,
+    displayChordTab,
+    displayRoot,
+  ]);
+
+  const pianoDefaultLitMidis = useMemo(() => {
+    const { all, lh, rh } = pianoNotes;
+    const s = new Set<number>();
+    if (lh.length > 0 || rh.length > 0) {
+      for (const n of lh) {
+        const m = Note.midi(n);
+        if (m != null) s.add(m);
+      }
+      for (const n of rh) {
+        const m = Note.midi(n);
+        if (m != null) s.add(m);
+      }
+      return s;
+    }
+    const chordAll = all.length > 0 && all.length <= 6 && !!displayRoot;
+    if (chordAll && displayRoot) {
+      const built = buildChordMidis(all, displayRoot);
+      if (built) for (const m of built.midis) s.add(m);
+    }
+    return s;
+  }, [pianoNotes, displayRoot]);
+
+  const pianoLitChromas = useMemo(() => {
+    const { all, lh, rh } = pianoNotes;
+    const voicing = lh.length > 0 || rh.length > 0;
+    const chordAll = !voicing && all.length > 0 && all.length <= 6 && !!displayRoot;
+    if (voicing || chordAll || selectedScale) return new Set<number>();
+    const s = new Set<number>();
+    for (const n of all) {
+      const c = Note.chroma(n);
+      if (c != null) s.add(c);
+    }
+    return s;
+  }, [pianoNotes, displayRoot, selectedScale]);
+
+  /** Taps ∪ chord/voicing keys still lit on the piano (respects click-to-dim omissions). */
+  const effectiveHarmonyPianoMidis = useMemo(() => {
+    const midis = new Set<number>();
+    for (const m of tappedMidis) midis.add(m);
+
+    if (selectedScale) {
+      return midis;
+    }
+
+    const { all, lh, rh } = pianoNotes;
+    const voicing = lh.length > 0 || rh.length > 0;
+    const chordAll = !voicing && all.length > 0 && all.length <= 6 && !!displayRoot;
+
+    if (voicing || chordAll) {
+      for (const m of pianoDefaultLitMidis) {
+        if (!pianoOmittedMidis.has(m)) midis.add(m);
+      }
+      return midis;
+    }
+
+    if (pianoLitChromas.size === 0) {
+      return midis;
+    }
+
+    for (const m of COMPACT_PIANO_ROLL_MIDIS) {
+      const ch = m % 12;
+      if (!pianoLitChromas.has(ch)) continue;
+      if (pianoOmittedChromas.has(ch)) continue;
+      midis.add(m);
+    }
+    return midis;
+  }, [
+    tappedMidis,
+    selectedScale,
+    pianoNotes,
+    pianoDefaultLitMidis,
+    pianoOmittedMidis,
+    pianoLitChromas,
+    pianoOmittedChromas,
+  ]);
+
+  const effectiveHarmonyPianoNotes = useMemo(
+    () => uniquePitchClassNoteStrings(effectiveHarmonyPianoMidis),
+    [effectiveHarmonyPianoMidis],
+  );
+
+  const interactiveAnalysis = useMemo(() => {
+    let notes: string[] = [];
+    if (mirrorGuitarToPiano) {
+      const tab =
+        fretboardInstrument === 'guitar' && guitarChordTabForFretboard?.length === 6
+          ? guitarChordTabForFretboard
+          : tappedGuitarTab;
+      const gNotes = tab ? tabToMidiNotes(tab, true) : [];
+      notes = mergeNoteStringsUniqueByChroma(effectiveHarmonyPianoNotes, gNotes);
+    } else if (tappedGuitarTab) {
+      const g = tabToMidiNotes(tappedGuitarTab, true);
+      notes = uniquePitchClassNoteStrings(
+        g.map(n => Note.midi(n)).filter((m): m is number => m != null),
+      );
+    } else {
+      notes = effectiveHarmonyPianoNotes;
+    }
+
+    if (notes.length === 0) return { library: [], theory: [] };
+    const libMatches = detectLibraryChords(notes);
+    const theoryMatches = Chord.detect(notes).filter((c: string) => !libMatches.includes(c));
+    return { library: libMatches, theory: theoryMatches };
+  }, [
+    mirrorGuitarToPiano,
+    tappedGuitarTab,
+    effectiveHarmonyPianoNotes,
+    fretboardInstrument,
+    guitarChordTabForFretboard,
+  ]);
+
+  /** Piano/fret tap IDs — same row as the written chord, between instruments and chart (not in the chart). */
+  const chartTapHarmonyLine = useMemo(() => {
+    if (!activeSong || selectedScale) return null;
+    if (
+      tappedMidis.size === 0 &&
+      !tappedGuitarTab &&
+      staffScratch.length === 0 &&
+      !(mirrorGuitarToPiano && effectiveHarmonyPianoNotes.length > 0)
+    )
+      return null;
+
+    let tapNotes: string[] = [];
+    if (mirrorGuitarToPiano) {
+      const tab =
+        fretboardInstrument === 'guitar' && guitarChordTabForFretboard?.length === 6
+          ? guitarChordTabForFretboard
+          : tappedGuitarTab;
+      const gNotes = tab ? tabToMidiNotes(tab, true) : [];
+      tapNotes = mergeNoteStringsUniqueByChroma(effectiveHarmonyPianoNotes, gNotes);
+    } else if (tappedGuitarTab) {
+      tapNotes = tabToMidiNotes(tappedGuitarTab, true);
+    } else {
+      tapNotes = effectiveHarmonyPianoNotes;
+    }
+
+    const activeNotes = mergeHarmonyNoteStrings(tapNotes, staffScratch);
+    if (activeNotes.length === 0) return null;
+
+    const analysis = interactiveAnalysis;
+    const names = [...analysis.library, ...analysis.theory];
+
+    const clear = (e: MouseEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      setTappedMidis(new Set());
+      setTappedGuitarTab(null);
+      setStaffScratch([]);
+      setStaffOmittedMidis(new Set());
+      setStaffOmittedChromas(new Set());
+      setPianoOmittedMidis(new Set());
+      setPianoOmittedChromas(new Set());
+      setSelectedStaffScratchId(null);
+    };
+
+    return (
+      <>
+        <span className="chord-tap-harmony-symbols">
+          {names.length > 0 ? (
+            names.map((c, i) => (
+              <span key={`${c}-${i}`}>
+                {i > 0 ? <span className="chord-tap-harmony-sep"> · </span> : null}
+                <span className={i < analysis.library.length ? 'chord-tap-lib' : 'chord-tap-theory'}>{c}</span>
+              </span>
+            ))
+          ) : activeNotes.length < 3 ? (
+            '…'
+          ) : (
+            <span className="chord-tap-pcs">{activeNotes.map(n => Note.get(n).pc).join(' ')}</span>
+          )}
+        </span>
+        <button type="button" className="chord-tap-harmony-clear" onClick={clear} title="Clear tapped notes">
+          ×
+        </button>
+      </>
+    );
+  }, [
+    activeSong,
+    selectedScale,
+    tappedMidis,
+    tappedGuitarTab,
+    mirrorGuitarToPiano,
+    interactiveAnalysis,
+    staffScratch,
+    effectiveHarmonyPianoNotes,
+    fretboardInstrument,
+    guitarChordTabForFretboard,
+  ]);
+
+  /** Same pitches as the piano panel: lh/rh voicings, slash splits, and chord-all / mirror spelling via buildChordMidis. */
+  const staffNotes = useMemo(() => {
+    if (selectedScale)
+      return assignOctaves(selectedScale.notes, showStaffBassClef ? 3 : 4);
+    const { all, lh, rh } = pianoNotes;
+    if (lh.length > 0 || rh.length > 0) {
+      const combined = [...lh, ...rh];
+      combined.sort((a, b) => (Note.midi(a) || 0) - (Note.midi(b) || 0));
+      return combined;
+    }
+    if (all.length === 0) return [];
+    const root = displayRoot;
+    const isChordAll = all.length > 0 && all.length <= 6 && !!root;
+    if (isChordAll && root) return spellChordNotesLikePianoRoll(all, root);
+    return assignOctaves(all.map(n => n.replace(/\d+$/, '')));
+  }, [selectedScale, pianoNotes, displayRoot, showStaffBassClef]);
+
+  const baseForStaff = useMemo(
+    () =>
+      staffNotes.filter(n => {
+        const m = Note.midi(n);
+        const ch = Note.chroma(n);
+        if (m != null && staffOmittedMidis.has(m)) return false;
+        if (ch != null && staffOmittedChromas.has(ch)) return false;
+        return true;
+      }),
+    [staffNotes, staffOmittedMidis, staffOmittedChromas],
+  );
+
+  const mergedStaffDisplay = useMemo(
+    () => mergeStaffWithScratch(baseForStaff, staffScratch),
+    [baseForStaff, staffScratch],
+  );
+
+  /** Staff scratch + merged staff spelling for each lit MIDI (piano key labels, ##/bb). */
+  const pianoPitchClassByMidi = useMemo(() => {
+    const map = new Map<number, string>();
+    const mergedNotes = mergedStaffDisplay.notes;
+    const { all, lh, rh } = pianoNotes;
+    const voicingNotes = [...lh, ...rh, ...all];
+    for (const midi of effectiveHarmonyPianoMidis) {
+      let label: string | undefined;
+      const sc = staffScratch.find(s => Note.midi(s.note) === midi);
+      if (sc) label = sc.note.replace(/\d+$/, '');
+      if (!label) {
+        const sn = mergedNotes.find(n => Note.midi(n) === midi);
+        if (sn) label = sn.replace(/\d+$/, '');
+      }
+      if (!label) {
+        const vn = voicingNotes.find(n => Note.midi(n) === midi);
+        if (vn) label = vn.replace(/\d+$/, '');
+      }
+      if (!label) label = Note.pitchClass(Note.fromMidi(midi) ?? '') || '';
+      map.set(midi, label);
+    }
+    return map;
+  }, [
+    effectiveHarmonyPianoMidis,
+    mergedStaffDisplay.notes,
+    staffScratch,
+    pianoNotes,
+  ]);
+
+  const mergedStaffNoteColors = useMemo(() => {
+    if (!chromaColorMap || mergedStaffDisplay.notes.length === 0) return undefined;
+    return mergedStaffDisplay.notes.map(n => {
+      const ch = Note.chroma(n);
+      return ch != null ? chromaColorMap.get(ch) : undefined;
+    });
+  }, [mergedStaffDisplay.notes, chromaColorMap]);
+
+  const selectedStaffScratchNote = useMemo(
+    () => staffScratch.find(s => s.id === selectedStaffScratchId)?.note ?? null,
+    [staffScratch, selectedStaffScratchId],
+  );
+
+  useEffect(() => {
+    if (selectedStaffScratchId != null) {
+      setStaffHoverMidi(null);
+      setStaffHoverPitchClass(null);
+    }
+  }, [selectedStaffScratchId]);
+
+  useEffect(() => {
+    setStaffScratch([]);
+    setStaffOmittedMidis(new Set());
+    setStaffOmittedChromas(new Set());
+    setSelectedStaffScratchId(null);
+    setStaffHoverMidi(null);
+    setStaffHoverPitchClass(null);
+  }, [selectedChord?.symbol, selectedScale?.name, selectedSongIndex]);
+
+  const handleStaffScratchRemove = useCallback((id: string) => {
+    let omitMidi: number | undefined;
+    let tapMidi: number | undefined;
+    setStaffScratch(prev => {
+      const entry = prev.find(s => s.id === id);
+      omitMidi = entry?.replacesChartMidi;
+      const mm = entry ? Note.midi(entry.note) : null;
+      if (mm != null) tapMidi = mm;
+      return prev.filter(s => s.id !== id);
+    });
+    if (tapMidi != null) {
+      setTappedMidis(tm => {
+        const next = new Set(tm);
+        next.delete(tapMidi!);
+        return next;
+      });
+    }
+    if (omitMidi != null) {
+      setStaffOmittedMidis(om => {
+        const next = new Set(om);
+        next.add(omitMidi!);
+        return next;
+      });
+      setPianoOmittedMidis(om => {
+        const next = new Set(om);
+        next.add(omitMidi!);
+        return next;
+      });
+    }
+    setSelectedStaffScratchId(cur => (cur === id ? null : cur));
+  }, []);
+
+  const bumpStaffScratchAccidental = useCallback(
+    (id: string, dir: 'sharp' | 'flat' | 'natural') => {
+      let oldMidi: number | undefined;
+      let newMidi: number | undefined;
+      setStaffScratch(prev => {
+        const s = prev.find(x => x.id === id);
+        if (!s) return prev;
+        const newNote = scratchApplyAccidental(s.note, dir);
+        const o = Note.midi(s.note);
+        const n = Note.midi(newNote);
+        if (o != null && n != null && o !== n) {
+          oldMidi = o;
+          newMidi = n;
+        }
+        return prev.map(x => (x.id !== id ? x : { ...x, note: newNote }));
+      });
+      if (oldMidi != null && newMidi != null) {
+        setTappedMidis(tm => {
+          const next = new Set(tm);
+          next.delete(oldMidi!);
+          next.add(newMidi!);
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const handleStaffScratchSharp = useCallback(
+    (id: string) => bumpStaffScratchAccidental(id, 'sharp'),
+    [bumpStaffScratchAccidental],
+  );
+  const handleStaffScratchFlat = useCallback(
+    (id: string) => bumpStaffScratchAccidental(id, 'flat'),
+    [bumpStaffScratchAccidental],
+  );
+  const handleStaffScratchNatural = useCallback(
+    (id: string) => bumpStaffScratchAccidental(id, 'natural'),
+    [bumpStaffScratchAccidental],
+  );
+
+  const handleMirrorGuitarPianoPick = useCallback(
+    (pick: GuitarMirrorPick) => {
+      const { stringIndex: d, fret } = pick;
+      if (d < 0 || d > 5) return;
+      const base = guitarChordTabForFretboard;
+      const tab: GuitarTab =
+        base && base.length === 6 ? [...base] : [null, null, null, null, null, null];
+      if (tab[d] === fret) tab[d] = null;
+      else tab[d] = fret;
+      if (isFretboardEditable) setEditableGuitarTab(tab);
+      else setTappedGuitarTab(tab);
+    },
+    [guitarChordTabForFretboard, isFretboardEditable],
+  );
+
+  const handleTogglePianoNote = useCallback(
+    (midi: number, mirrorPick?: GuitarMirrorPick) => {
+      const guitarMirrorSlots =
+        mirrorGuitarToPiano &&
+        voicingType === 'guitar' &&
+        fretboardInstrument === 'guitar' &&
+        !selectedScale &&
+        fretboardMode === 'chord';
+
+      if (guitarMirrorSlots && mirrorPick) {
+        handleMirrorGuitarPianoPick(mirrorPick);
+        return;
+      }
+
+      const ch = midi % 12;
+      const voicing = pianoNotes.lh.length > 0 || pianoNotes.rh.length > 0;
+      const chordAll =
+        !voicing && pianoNotes.all.length > 0 && pianoNotes.all.length <= 6 && !!displayRoot;
+
+      if (tappedMidis.has(midi)) {
+        setTappedMidis(prev => {
+          const next = new Set(prev);
+          next.delete(midi);
+          return next;
+        });
+        setStaffScratch(prev => prev.filter(s => Note.midi(s.note) !== midi));
+        if (!mirrorGuitarToPiano && tappedGuitarTab) setTappedGuitarTab(null);
+        return;
+      }
+      if (pianoOmittedMidis.has(midi)) {
+        setPianoOmittedMidis(prev => {
+          const next = new Set(prev);
+          next.delete(midi);
+          return next;
+        });
+        setStaffOmittedMidis(prev => {
+          const next = new Set(prev);
+          next.delete(midi);
+          return next;
+        });
+        return;
+      }
+      if (pianoOmittedChromas.has(ch)) {
+        setPianoOmittedChromas(prev => {
+          const next = new Set(prev);
+          next.delete(ch);
+          return next;
+        });
+        setStaffOmittedChromas(prev => {
+          const next = new Set(prev);
+          next.delete(ch);
+          return next;
+        });
+        return;
+      }
+      if (voicing || chordAll) {
+        if (pianoDefaultLitMidis.has(midi)) {
+          setPianoOmittedMidis(prev => {
+            const next = new Set(prev);
+            next.add(midi);
+            return next;
+          });
+          setStaffOmittedMidis(prev => {
+            const next = new Set(prev);
+            next.add(midi);
+            return next;
+          });
+          return;
+        }
+      } else if (!selectedScale && pianoLitChromas.has(ch)) {
+        setPianoOmittedChromas(prev => {
+          const next = new Set(prev);
+          next.add(ch);
+          return next;
+        });
+        setStaffOmittedChromas(prev => {
+          const next = new Set(prev);
+          next.add(ch);
+          return next;
+        });
+        return;
+      }
+
+      if (tappedMidis.size < 12) {
+        setTappedMidis(prev => {
+          const next = new Set(prev);
+          next.add(midi);
+          return next;
+        });
+        if (!mirrorGuitarToPiano && tappedGuitarTab) setTappedGuitarTab(null);
+
+        if (activeSong) {
+          let newScratchId: string | null = null;
+          setStaffScratch(prevScratch => {
+            const merged = mergeStaffWithScratch(baseForStaff, prevScratch);
+            if (merged.notes.some(n => Note.midi(n) === midi)) return prevScratch;
+            const name = Note.fromMidi(midi);
+            if (!name) return prevScratch;
+            newScratchId = `s-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            const note = normalizeStaffScratchSpelling(name);
+            return [...prevScratch, { id: newScratchId!, note, replacesChartMidi: midi }];
+          });
+          if (newScratchId) setSelectedStaffScratchId(newScratchId);
+        }
+      }
+    },
+    [
+      tappedMidis,
+      pianoOmittedMidis,
+      pianoOmittedChromas,
+      pianoNotes,
+      displayRoot,
+      pianoDefaultLitMidis,
+      pianoLitChromas,
+      mirrorGuitarToPiano,
+      tappedGuitarTab,
+      selectedScale,
+      activeSong,
+      baseForStaff,
+      voicingType,
+      fretboardMode,
+      fretboardInstrument,
+      handleMirrorGuitarPianoPick,
+    ],
+  );
+
+  const guitarDrawPianoMirror =
+    mirrorGuitarToPiano &&
+    voicingType === 'guitar' &&
+    fretboardInstrument === 'guitar' &&
+    !selectedScale &&
+    fretboardMode === 'chord';
+
+  const handleStaffPitchClick = useCallback(
+    (rawStaffPitch: string, mirrorHint?: { x: number; width: number }) => {
+      if (!activeSong) return;
+      const spelled = spellPitchOnStaffInKey(rawStaffPitch, activeSong.key);
+
+      if (
+        guitarDrawPianoMirror &&
+        mirrorHint &&
+        guitarChordTabForFretboard?.length === 6
+      ) {
+        const aligned = spellLikeChordChart(spelled, baseForStaff);
+        const clickMidi = Note.midi(aligned) ?? Note.midi(spelled);
+        if (clickMidi != null) {
+          const mergedEarly = mergeStaffWithScratch(baseForStaff, staffScratch);
+          let idxEarly = mergedEarly.notes.findIndex(n => Note.midi(n) === clickMidi);
+          if (idxEarly < 0) {
+            const ch = ((clickMidi % 12) + 12) % 12;
+            const byChroma = mergedEarly.notes
+              .map((n, i) => ({ i, m: Note.midi(n) }))
+              .filter(
+                (x): x is { i: number; m: number } =>
+                  x.m != null && ((x.m % 12) + 12) % 12 === ch,
+              );
+            byChroma.sort((a, b) => Math.abs(a.m - clickMidi) - Math.abs(b.m - clickMidi));
+            if (byChroma.length > 0) idxEarly = byChroma[0]!.i;
+          }
+          if (idxEarly >= 0) {
+            const sidEarly = mergedEarly.scratchIdPerIndex[idxEarly];
+            if (sidEarly) {
+              setSelectedStaffScratchId(sidEarly);
+              setTappedMidis(prev => new Set(prev).add(clickMidi));
+              return;
+            }
+          }
+          const pick = resolveGuitarMirrorPick({
+            centerX: mirrorHint.x,
+            totalWidth: Math.max(1, mirrorHint.width),
+            clickedMidi: clickMidi,
+            chordTab: guitarChordTabForFretboard,
+            fretWindow: clippedFretboardRange,
+          });
+          if (pick) {
+            if (idxEarly >= 0) {
+              handleTogglePianoNote(clickMidi, pick);
+              const displayNote = normalizeStaffScratchSpelling(mergedEarly.notes[idxEarly]!);
+              const slotMidi = Note.midi(displayNote);
+              const id = `s-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+              setStaffScratch(prev => [
+                ...prev,
+                { id, note: displayNote, replacesChartMidi: slotMidi ?? undefined },
+              ]);
+              setSelectedStaffScratchId(id);
+              setTappedMidis(prev => new Set(prev).add(Note.midi(displayNote) ?? clickMidi));
+            } else {
+              setSelectedStaffScratchId(null);
+              handleTogglePianoNote(clickMidi, pick);
+            }
+            return;
+          }
+        }
+      }
+
+      const m = Note.midi(spelled);
+      if (m == null) return;
+
+      if (selectedStaffScratchId) {
+        const cur = staffScratch.find(s => s.id === selectedStaffScratchId)?.note;
+        const curM = cur != null ? Note.midi(cur) : null;
+        if (curM === m) {
+          setSelectedStaffScratchId(null);
+          return;
+        }
+      }
+
+      const merged = mergeStaffWithScratch(baseForStaff, staffScratch);
+      const idx = merged.notes.findIndex(n => Note.midi(n) === m);
+      if (idx >= 0) {
+        const sid = merged.scratchIdPerIndex[idx];
+        if (sid) {
+          setSelectedStaffScratchId(sid);
+          setTappedMidis(prev => new Set(prev).add(m));
+          return;
+        }
+        const displayNote = normalizeStaffScratchSpelling(merged.notes[idx]!);
+        const slotMidi = Note.midi(displayNote);
+        const id = `s-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        setStaffScratch(prev => [
+          ...prev,
+          { id, note: displayNote, replacesChartMidi: slotMidi ?? undefined },
+        ]);
+        setSelectedStaffScratchId(id);
+        setTappedMidis(prev => new Set(prev).add(Note.midi(displayNote) ?? m));
+        return;
+      }
+
+      const id = `s-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const note = normalizeStaffScratchSpelling(spellLikeChordChart(spelled, baseForStaff));
+      const noteMidi = Note.midi(note) ?? m;
+      setStaffScratch(prev => [...prev, { id, note, replacesChartMidi: noteMidi }]);
+      setSelectedStaffScratchId(id);
+      setTappedMidis(prev => new Set(prev).add(noteMidi));
+    },
+    [
+      activeSong,
+      baseForStaff,
+      staffScratch,
+      selectedStaffScratchId,
+      guitarDrawPianoMirror,
+      guitarChordTabForFretboard,
+      clippedFretboardRange,
+      handleTogglePianoNote,
+    ],
+  );
+
+  const handleStaffHoverPitch = useCallback(
+    (raw: string | null, mirrorHint?: { x: number; width: number } | null) => {
+      if (raw == null || !activeSong) {
+        setStaffHoverMidi(null);
+        setStaffHoverPitchClass(null);
+        return;
+      }
+      const spelled = spellPitchOnStaffInKey(raw, activeSong.key);
+      const aligned = spellLikeChordChart(spelled, baseForStaff);
+      const m = Note.midi(aligned);
+
+      if (
+        guitarDrawPianoMirror &&
+        mirrorHint &&
+        m != null &&
+        guitarChordTabForFretboard?.length === 6
+      ) {
+        const pick = resolveGuitarMirrorPick({
+          centerX: mirrorHint.x,
+          totalWidth: Math.max(1, mirrorHint.width),
+          clickedMidi: m,
+          chordTab: guitarChordTabForFretboard,
+          fretWindow: clippedFretboardRange,
+        });
+        if (pick != null) {
+          const sound = midiForDisplayStringFret(pick.stringIndex, pick.fret);
+          if (sound != null) {
+            setStaffHoverMidi(snapMidiToCompactPianoRoll(sound));
+            setStaffHoverPitchClass(aligned.replace(/\d+$/, ''));
+            return;
+          }
+        }
+      }
+
+      setStaffHoverMidi(m ?? null);
+      setStaffHoverPitchClass(m != null ? aligned.replace(/\d+$/, '') : null);
+    },
+    [
+      activeSong,
+      baseForStaff,
+      guitarDrawPianoMirror,
+      guitarChordTabForFretboard,
+      clippedFretboardRange,
+    ],
+  );
+
+  const mirrorGuitarPianoActiveMidis = useMemo(() => {
+    if (
+      !mirrorGuitarToPiano ||
+      voicingType !== 'guitar' ||
+      fretboardInstrument !== 'guitar' ||
+      !guitarChordTabForFretboard ||
+      guitarChordTabForFretboard.length !== 6
+    )
+      return null;
+    const s = new Set<number>();
+    for (const n of tabToMidiNotes(guitarChordTabForFretboard, true)) {
+      const m = Note.midi(n);
+      if (m != null) s.add(snapMidiToCompactPianoRoll(m));
+    }
+    return s;
+  }, [mirrorGuitarToPiano, voicingType, fretboardInstrument, guitarChordTabForFretboard]);
 
   const guitarSlashBassCaption = useMemo(
     () =>
@@ -694,12 +1526,13 @@ export default function App() {
   const guitarChordTabRef = useRef(guitarChordTab);
   guitarChordTabRef.current = guitarChordTab;
   useEffect(() => {
-    if (!showLibrary || !selectedChord || guitarPosition < 0) {
+    if (!isFretboardEditable || !selectedChord) {
       setEditableGuitarTab(null);
       prevLibraryFretKeyRef.current = '';
       return;
     }
-    const key = `${selectedChord.symbol}|${guitarPosition}|${voicingSourceSig}`;
+    const editCtx = showLibrary ? 'lib' : 'tools';
+    const key = `${selectedChord.symbol}|${guitarPosition}|${voicingSourceSig}|${editCtx}`;
     if (prevLibraryFretKeyRef.current === key) {
       return;
     }
@@ -712,7 +1545,47 @@ export default function App() {
         ? [...fromDb].reverse()
         : guitarChordTabRef.current;
     setEditableGuitarTab(source ? [...source] : [null, null, null, null, null, null]);
-  }, [showLibrary, selectedChord?.symbol, guitarPosition, voicingSourceSig, dbShapes]);
+  }, [
+    isFretboardEditable,
+    showLibrary,
+    selectedChord?.symbol,
+    guitarPosition,
+    voicingSourceSig,
+    dbShapes,
+  ]);
+
+  useEffect(() => {
+    if (prevShowLibraryForChartNavRef.current && !showLibrary) {
+      lastChartChordNavKeyRef.current = '';
+    }
+    prevShowLibraryForChartNavRef.current = showLibrary;
+  }, [showLibrary]);
+
+  useEffect(() => {
+    if (showLibrary || !activeSong || selectedMeasure === null) return;
+    const chord = activeSong.measures[selectedMeasure]?.chords[selectedChordIdx];
+    if (!chord) return;
+    const key = `${selectedSongIndex}-${selectedMeasure}-${selectedChordIdx}-${chord.symbol}`;
+    if (lastChartChordNavKeyRef.current === key) return;
+    lastChartChordNavKeyRef.current = key;
+    const { tabs } = lookupChordShapes(chord.symbol, customChordsOverride);
+    const sym = canonicalChordSymbol(chord.symbol);
+    const stored = chartGuitarDefaultPos[sym];
+    const pos =
+      stored !== undefined && Number.isFinite(stored) && stored >= 0 && stored <= 4
+        ? Math.floor(stored)
+        : findFirstBarreIndex(tabs);
+    setGuitarPosition(pos);
+    setGuitarVoicingVariant(0);
+  }, [
+    showLibrary,
+    activeSong,
+    selectedSongIndex,
+    selectedMeasure,
+    selectedChordIdx,
+    chartGuitarDefaultPos,
+    customChordsOverride,
+  ]);
 
   useEffect(() => {
     setGuitarChordViewPan(0);
@@ -791,14 +1664,10 @@ export default function App() {
       const normalizedSuffix = CANONICAL_SUFFIX_MAP[rawSuffix] ?? rawSuffix;
       setLibrarySuffix(normalizedSuffix);
       setLibraryChord(chord);
-
-      const { tabs } = lookupChordShapes(chord.symbol, customChordsOverride);
-      const barreIdx = findFirstBarreIndex(tabs);
-      setGuitarPosition(barreIdx);
     }
-    
+
     setGuitarVoicingVariant(0);
-  }, [repeatPicker, activeSong, customChordsOverride]);
+  }, [repeatPicker, activeSong]);
 
   const handleScaleSelect = useCallback((scale: ScaleSuggestion) => {
     setSelectedScale(prev => {
@@ -852,20 +1721,6 @@ export default function App() {
     );
   }, []);
 
-const TUNING = [4, 9, 2, 7, 11, 4]; // E A D G B e
-
-/** Returns the index of the first "barre" shape in the list (3+ non-open strings on same fret). Defaults to 0 correctly. */
-function findFirstBarreIndex(tabs: GuitarTab[]): number {
-  const barreIdx = tabs.findIndex(tab => {
-    const frets = tab.filter((f): f is number => f != null && f > 0);
-    const counts: Record<number, number> = {};
-    frets.forEach(f => (counts[f] = (counts[f] || 0) + 1));
-    // 3 or more strings on the same fret typically indicates a barre (standard E, A shapes etc.)
-    return Object.values(counts).some(c => c >= 3);
-  });
-  return barreIdx >= 0 ? barreIdx : 0;
-}
-
   const toggleExpand = useCallback((id: InstrumentId) => {
     setExpandedInstrument(prev => {
       const next = prev === id ? null : id;
@@ -888,6 +1743,15 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
       return next;
     });
   }, []);
+
+  /** Top-right −/+ : expanded layout → return to default strip; strip → hide/show panel body. */
+  const instrumentPanelHeaderCollapseClick = useCallback(
+    (id: InstrumentId, expanded: boolean) => {
+      if (expanded) toggleExpand(id);
+      else toggleCollapse(id);
+    },
+    [toggleCollapse, toggleExpand],
+  );
 
   useEffect(() => {
     const player = playerRef.current!;
@@ -1045,14 +1909,29 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
   const showVoicingSelect = !!selectedChord && !selectedScale;
 
   const renderStaff = (expanded: boolean) => (
-    <div className={`instrument-card ${expanded ? 'expanded-card' : 'staff-card'}`}>
+    <div
+      className={`instrument-card ${expanded ? 'expanded-card' : 'staff-card'}${
+        collapsedInstruments.has('staff') ? ' instrument-card--body-collapsed' : ''
+      }`}
+    >
       <div className="instrument-header">
-        <span className={staffLabel ? 'instrument-chord-name' : 'instrument-label'}>
-          {staffLabel || 'Staff'}
-        </span>
+        <span className="instrument-label">Staff</span>
         <div className="instrument-header-actions">
-          {staffNotes.length > 0 && (
+          <button
+            type="button"
+            className={`staff-names-btn ${showStaffBassClef ? 'active' : ''}`}
+            onClick={() => setShowStaffBassClef(v => !v)}
+            title={
+              showStaffBassClef
+                ? 'Hide bass staff (B clef)'
+                : 'Show grand staff with bass (B / F clef) staff'
+            }
+          >
+            BClef
+          </button>
+          {!collapsedInstruments.has('staff') && (
             <button
+              type="button"
               className={`staff-names-btn ${showStaffNoteNames ? 'active' : ''}`}
               onClick={() => setShowStaffNoteNames(v => !v)}
               title={showStaffNoteNames ? 'Hide note names' : 'Show note names'}
@@ -1061,100 +1940,81 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
             </button>
           )}
           <button
+            type="button"
             className="expand-btn"
-            onClick={() => toggleCollapse('staff')}
-            title={collapsedInstruments.has('staff') ? 'Expand notation panel' : 'Collapse notation panel'}
+            onClick={() => instrumentPanelHeaderCollapseClick('staff', expanded)}
+            title={
+              expanded
+                ? 'Return to default view'
+                : collapsedInstruments.has('staff')
+                  ? 'Show panel content'
+                  : 'Collapse panel'
+            }
           >
-            {collapsedInstruments.has('staff') ? '+' : '−'}
+            {!expanded && collapsedInstruments.has('staff') ? '+' : '−'}
           </button>
+          {collapsedInstruments.has('staff') && (
+            <button
+              type="button"
+              className="expand-btn instrument-panel-expand"
+              onClick={() => toggleExpand('staff')}
+              title={expanded ? 'Return to default view' : 'Expand panel'}
+            >
+              {expanded ? '△' : '▽'}
+            </button>
+          )}
         </div>
       </div>
       <div className="instrument-card-body">
         {!collapsedInstruments.has('staff') && (
           <Staff
-            key={`staff-${expanded}`}
-            notes={staffNotes}
+            notes={mergedStaffDisplay.notes}
             mode={staffMode}
             keySignature={activeSong!.key}
             showNoteNames={showStaffNoteNames}
-            noteColors={staffNoteColors}
+            noteColors={mergedStaffNoteColors}
+            showBassClef={showStaffBassClef}
+            scratchIdPerIndex={selectedScale ? null : mergedStaffDisplay.scratchIdPerIndex}
+            staffInteractive={!selectedScale}
+            selectedScratchId={selectedStaffScratchId}
+            selectedScratchNote={selectedStaffScratchNote}
+            onStaffSelectScratch={setSelectedStaffScratchId}
+            onStaffPitchClick={handleStaffPitchClick}
+            onStaffHoverPitch={handleStaffHoverPitch}
+            chartSpellNotes={baseForStaff}
+            onStaffScratchRemove={handleStaffScratchRemove}
+            onStaffScratchSharp={handleStaffScratchSharp}
+            onStaffScratchFlat={handleStaffScratchFlat}
+            onStaffScratchNatural={handleStaffScratchNatural}
+            staffDrawMode={guitarDrawPianoMirror}
           />
         )}
       </div>
-      <div className="instrument-card-footer">
-        <button
-          type="button"
-          className="expand-btn instrument-panel-expand"
-          onClick={() => toggleExpand('staff')}
-          title={expanded ? 'Collapse panel' : 'Expand panel'}
-        >
-          {expanded ? '△' : '▽'}
-        </button>
-      </div>
+      {!collapsedInstruments.has('staff') && (
+        <div className="instrument-card-footer">
+          <div className="instrument-card-footer-actions">
+            <button
+              type="button"
+              className="expand-btn instrument-panel-expand"
+              onClick={() => toggleExpand('staff')}
+              title={expanded ? 'Return to default view' : 'Expand panel'}
+            >
+              {expanded ? '△' : '▽'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 
   const pianoVoicingIdx = VOICING_OPTIONS.findIndex(o => o.value === voicingType);
 
-  const renderAnalysis = () => {
-    if (selectedScale) return null;
-    if (tappedMidis.size === 0 && !tappedGuitarTab) return null;
-
-    let activeNotes: string[] = [];
-    if (mirrorGuitarToPiano) {
-      const pNotes = Array.from(tappedMidis).map(m => Note.fromMidi(m)).filter((n): n is string => n != null);
-      const gNotes = tappedGuitarTab ? tabToMidiNotes(tappedGuitarTab, true) : [];
-      activeNotes = [...new Set([...pNotes, ...gNotes])].sort((a,b) => (Note.midi(a)??0) - (Note.midi(b)??0));
-    } else {
-      if (tappedMidis.size > 0) {
-        activeNotes = Array.from(tappedMidis).map(m => Note.fromMidi(m)).filter((n): n is string => n != null).sort((a,b) => (Note.midi(a)??0) - (Note.midi(b)??0));
-      } else if (tappedGuitarTab) {
-        activeNotes = tabToMidiNotes(tappedGuitarTab, true).sort((a,b) => (Note.midi(a)??0) - (Note.midi(b)??0));
-      }
-    }
-
-    if (activeNotes.length === 0) return null;
-
-    return (
-      <div className="piano-analysis" style={{ marginTop: '12px' }}>
-        <div className="analysis-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <span style={{ fontWeight: 800 }}>Chord Identification</span>
-            <div className="analysis-notes" style={{ fontSize: '11px', opacity: 0.8, background: 'rgba(255,255,255,0.05)', padding: '1px 6px', borderRadius: '4px' }}>
-              {activeNotes.map(n => Note.get(n).pc).join(', ')}
-            </div>
-          </div>
-          <button className="clear-btn" onClick={() => { setTappedMidis(new Set()); setTappedGuitarTab(null); }}>Clear</button>
-        </div>
-        <div className="detected-list">
-          {(() => {
-            const analysis = interactiveAnalysis;
-            if (analysis.library.length > 0 || analysis.theory.length > 0) {
-              return (
-                <>
-                  {analysis.library.map((c: string) => (
-                    <span key={c} className="detected-chord library-match" title="Found in library">
-                      {c}
-                    </span>
-                  ))}
-                  {analysis.theory.map((c: string) => (
-                    <span key={c} className="detected-chord theory-match" title="Theory match">
-                      {c}
-                    </span>
-                  ))}
-                </>
-              );
-            }
-            if (activeNotes.length < 3) return <span className="analysis-empty">Add more notes...</span>;
-            return <span className="analysis-empty">No chord identified</span>;
-          })()}
-        </div>
-      </div>
-    );
-  };
-
   const renderPiano = (expanded: boolean) => (
-    <div className={`instrument-card ${expanded ? 'expanded-card' : 'piano-card'}`}>
+    <div
+      className={`instrument-card ${expanded ? 'expanded-card' : 'piano-card'}${
+        collapsedInstruments.has('piano') ? ' instrument-card--body-collapsed' : ''
+      }`}
+    >
       <div className="instrument-header">
         <span className="instrument-label">Piano</span>
         <div className="instrument-header-actions">
@@ -1201,13 +2061,40 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
               </button>
             </div>
           )}
+          {!collapsedInstruments.has('piano') && (
+            <button
+              type="button"
+              className={`staff-names-btn ${showPianoNoteNames ? 'active' : ''}`}
+              onClick={() => setShowPianoNoteNames((v) => !v)}
+              title={showPianoNoteNames ? 'Hide note names on keys' : 'Show note names on keys'}
+            >
+              Names
+            </button>
+          )}
           <button
+            type="button"
             className="expand-btn"
-            onClick={() => toggleCollapse('piano')}
-            title={collapsedInstruments.has('piano') ? 'Expand piano panel' : 'Collapse piano panel'}
+            onClick={() => instrumentPanelHeaderCollapseClick('piano', expanded)}
+            title={
+              expanded
+                ? 'Return to default view'
+                : collapsedInstruments.has('piano')
+                  ? 'Show panel content'
+                  : 'Collapse panel'
+            }
           >
-            {collapsedInstruments.has('piano') ? '+' : '−'}
+            {!expanded && collapsedInstruments.has('piano') ? '+' : '−'}
           </button>
+          {collapsedInstruments.has('piano') && (
+            <button
+              type="button"
+              className="expand-btn instrument-panel-expand"
+              onClick={() => toggleExpand('piano')}
+              title={expanded ? 'Return to default view' : 'Expand panel'}
+            >
+              {expanded ? '△' : '▽'}
+            </button>
+          )}
         </div>
       </div>
       <div className="instrument-card-body">
@@ -1220,23 +2107,60 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
             root={displayRoot}
             scaleRoot={selectedScale ? selectedScale.notes[0] : undefined}
             degreeColorMap={chromaColorMap}
-            onToggleNote={handleTogglePianoNote}
-            activeMidis={tappedMidis.size > 0 ? tappedMidis : (tappedGuitarTab ? new Set(tabToMidiNotes(tappedGuitarTab, true).map(n => Note.midi(n)).filter((m): m is number => m != null)) : undefined)}
+            onToggleNote={selectedScale ? undefined : handleTogglePianoNote}
+            readOnlyKeys={!!selectedScale}
+            guitarMirrorSlotMode={
+              mirrorGuitarToPiano &&
+              voicingType === 'guitar' &&
+              fretboardInstrument === 'guitar' &&
+              !selectedScale &&
+              fretboardMode === 'chord'
+            }
+            guitarMirrorChordTab={guitarChordTabForFretboard}
+            guitarMirrorFretWindow={clippedFretboardRange}
+            activeMidis={
+              mirrorGuitarToPiano &&
+              voicingType === 'guitar' &&
+              fretboardInstrument === 'guitar' &&
+              mirrorGuitarPianoActiveMidis &&
+              mirrorGuitarPianoActiveMidis.size > 0
+                ? mirrorGuitarPianoActiveMidis
+                : tappedMidis.size > 0
+                  ? tappedMidis
+                  : mirrorGuitarPianoActiveMidis && mirrorGuitarPianoActiveMidis.size > 0
+                    ? mirrorGuitarPianoActiveMidis
+                    : tappedGuitarTab
+                      ? new Set(
+                          tabToMidiNotes(tappedGuitarTab, true)
+                            .map(n => Note.midi(n))
+                            .filter((m): m is number => m != null),
+                        )
+                      : undefined
+            }
+            omittedMidis={pianoOmittedMidis}
+            omittedChromas={pianoOmittedChromas}
+            showKeyNoteNames={showPianoNoteNames}
+            staffHoverMidi={staffHoverMidi}
+            staffHoverPitchClass={staffHoverPitchClass}
+            pitchClassByMidi={pianoPitchClassByMidi}
           />
-          {renderAnalysis()}
         </div>
       )}
       </div>
-      <div className="instrument-card-footer">
-        <button
-          type="button"
-          className="expand-btn instrument-panel-expand"
-          onClick={() => toggleExpand('piano')}
-          title={expanded ? 'Collapse panel' : 'Expand panel'}
-        >
-          {expanded ? '△' : '▽'}
-        </button>
-      </div>
+      {!collapsedInstruments.has('piano') && (
+        <div className="instrument-card-footer">
+          <div className="instrument-card-footer-actions">
+            <button
+              type="button"
+              className="expand-btn instrument-panel-expand"
+              onClick={() => toggleExpand('piano')}
+              title={expanded ? 'Return to default view' : 'Expand panel'}
+            >
+              {expanded ? '△' : '▽'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -1248,191 +2172,59 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
 
   const guitarOptionIdx = guitarOptionLabels.findIndex(o => o.value === guitarPosition);
 
-  useLayoutEffect(() => {
-    if (prevFretboardInstrumentRef.current !== fretboardInstrument) {
-      if (prevFretboardInstrumentRef.current !== null) {
-        fretboardCompactEnterWidthRef.current = 0;
-        setFretboardPosCompact(false);
-        setFretboardPosMenuOpen(false);
-      }
-      prevFretboardInstrumentRef.current = fretboardInstrument;
-    }
+  const bassOptionLabels = useMemo(
+    () => [
+      { value: -1 as const, label: 'All Frets' },
+      ...BASS_POSITIONS.map((p, i) => ({ value: i as 0 | 1 | 2, label: p.label })),
+    ],
+    [],
+  );
 
-    const HYSTERESIS_PX = 100;
-    const GUITAR_PILLS_PAD_PX = 10;
-
-    const isGuitarGrid =
-      fretboardInstrument === 'guitar' &&
-      displayNotes.length > 0 &&
-      expandedInstrument !== 'guitar';
-
-    if (isGuitarGrid) {
-      const checkGuitarGrid = () => {
-        const minW = guitarPillsMeasureRowRef.current?.offsetWidth ?? 0;
-        const boardW = guitarFretboardBoardRef.current?.clientWidth;
-        const footerW = guitarPosFooterRef.current?.clientWidth;
-        const cw = boardW ?? footerW ?? 0;
-        if (minW <= 0 || cw <= 0) return;
-
-        setFretboardPosCompact((prev) => {
-          if (!prev) {
-            if (cw < minW + GUITAR_PILLS_PAD_PX) {
-              fretboardCompactEnterWidthRef.current = cw;
-              return true;
-            }
-          } else {
-            const minExit = Math.max(
-              fretboardCompactEnterWidthRef.current + HYSTERESIS_PX,
-              minW + GUITAR_PILLS_PAD_PX,
-            );
-            if (cw >= minExit) return false;
-          }
-          return prev;
-        });
-      };
-
-      const ro = new ResizeObserver(() => {
-        requestAnimationFrame(checkGuitarGrid);
-      });
-      const board = guitarFretboardBoardRef.current;
-      const row = guitarPillsMeasureRowRef.current;
-      if (board) ro.observe(board);
-      if (row) ro.observe(row);
-      checkGuitarGrid();
-      return () => ro.disconnect();
-    }
-
-    if (fretboardInstrument !== 'bass') {
-      return;
-    }
-
-    const el = fretboardHeaderActionsRef.current;
-    if (!el) return;
-    /** Below this, bass pills + mode + utilities overlap/stack even when scrollWidth matches (flex shrink). */
-    const MIN_WIDTH_FOR_PILLS_PX = 520;
-
-    const check = () => {
-      const cw = el.clientWidth;
-      const sw = el.scrollWidth;
-      const overflowsX = sw > cw + 2;
-      const tooNarrowForPills = cw < MIN_WIDTH_FOR_PILLS_PX;
-      setFretboardPosCompact((prev) => {
-        if (!prev) {
-          if (overflowsX || tooNarrowForPills) {
-            fretboardCompactEnterWidthRef.current = cw;
-            return true;
-          }
-        } else {
-          const minExit = Math.max(
-            fretboardCompactEnterWidthRef.current + HYSTERESIS_PX,
-            MIN_WIDTH_FOR_PILLS_PX,
-          );
-          if (cw >= minExit) {
-            return false;
-          }
-        }
-        return prev;
-      });
-    };
-
-    check();
-    const ro = new ResizeObserver(() => {
-      requestAnimationFrame(check);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [
-    expandedInstrument,
-    collapsedInstruments,
-    fretboardInstrument,
-    currentSong,
-    displayNotes.length,
-    guitarOptionLabels.length,
-  ]);
-
-  useEffect(() => {
-    if (!fretboardPosCompact) setFretboardPosMenuOpen(false);
-  }, [fretboardPosCompact]);
-
-  useEffect(() => {
-    if (!fretboardPosMenuOpen) return;
-    const onPtr = (e: PointerEvent) => {
-      const w = posNavMenuWrapRef.current;
-      if (w && !w.contains(e.target as Node)) setFretboardPosMenuOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setFretboardPosMenuOpen(false);
-    };
-    document.addEventListener('pointerdown', onPtr);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onPtr);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [fretboardPosMenuOpen]);
+  const bassOptionIdx = bassOptionLabels.findIndex((o) => o.value === bassPosition);
 
   const renderGuitar = (expanded: boolean) => {
     const showGuitarPositions =
       fretboardInstrument === 'guitar' && displayNotes.length > 0;
-    const guitarPosCompactUI = !expanded && fretboardPosCompact;
-
+    const showBassPositions =
+      fretboardInstrument === 'bass' && displayNotes.length > 0;
+    const showFretboardPositionFooter =
+      (showGuitarPositions || showBassPositions) &&
+      !expanded &&
+      !collapsedInstruments.has('guitar');
     const guitarPositionNav = showGuitarPositions ? (
       <div className="guitar-position-nav">
-        {guitarPosCompactUI ? (
-          <div className="pos-nav-menu-wrap" ref={posNavMenuWrapRef}>
+        <div className="position-buttons guitar-position-buttons">
+          {guitarOptionLabels.map((opt) => (
             <button
+              key={opt.value}
               type="button"
-              className={`pos-nav-hamburger cycle-btn guitar-pos-arrow ${fretboardPosMenuOpen ? 'active' : ''}`}
-              aria-expanded={fretboardPosMenuOpen}
-              aria-haspopup="menu"
-              aria-label="Fret positions"
-              title="Fret positions"
-              onClick={() => setFretboardPosMenuOpen((o) => !o)}
+              className={`pos-btn ${guitarPosition === opt.value ? 'active' : ''}`}
+              onClick={() => {
+                setGuitarPosition(opt.value);
+                setGuitarVoicingVariant(0);
+              }}
             >
-              <span className="pos-nav-hamburger-icon" aria-hidden>
-                ☰
-              </span>
+              {opt.label === 'All Frets' ? 'All' : opt.label.replace('Pos ', 'P')}
             </button>
-            {fretboardPosMenuOpen && (
-              <div
-                className={`pos-nav-menu${guitarOptionLabels.length > 2 ? ' pos-nav-menu--grid' : ''}`}
-                role="menu"
-              >
-                {guitarOptionLabels.map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    role="menuitem"
-                    className={`pos-nav-menu-item ${guitarPosition === opt.value ? 'active' : ''}`}
-                    onClick={() => {
-                      setGuitarPosition(opt.value);
-                      setGuitarVoicingVariant(0);
-                      setFretboardPosMenuOpen(false);
-                    }}
-                  >
-                    {opt.label === 'All Frets' ? 'All' : opt.label.replace('Pos ', 'P')}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="position-buttons guitar-position-buttons">
-            {guitarOptionLabels.map((opt) => (
-              <button
-                key={opt.value}
-                type="button"
-                className={`pos-btn ${guitarPosition === opt.value ? 'active' : ''}`}
-                onClick={() => {
-                  setGuitarPosition(opt.value);
-                  setGuitarVoicingVariant(0);
-                }}
-              >
-                {opt.label === 'All Frets' ? 'All' : opt.label.replace('Pos ', 'P')}
-              </button>
-            ))}
-          </div>
-        )}
+          ))}
+        </div>
+      </div>
+    ) : null;
+
+    const bassPositionNav = showBassPositions ? (
+      <div className="guitar-position-nav">
+        <div className="position-buttons guitar-position-buttons">
+          {bassOptionLabels.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              className={`pos-btn ${bassPosition === opt.value ? 'active' : ''}`}
+              onClick={() => setBassPosition(opt.value)}
+            >
+              {opt.label === 'All Frets' ? 'All' : opt.label}
+            </button>
+          ))}
+        </div>
       </div>
     ) : null;
 
@@ -1451,22 +2243,32 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
           fretboardInstrument === 'bass' && !selectedScale ? bassChordGhostMidis : null
         }
         root={displayRoot}
-        startFret={fretboardInstrument === 'guitar' ? guitarDisplayStartFret : fretRange.startFret}
-        endFret={fretboardInstrument === 'guitar' ? guitarDisplayEndFret : fretRange.endFret}
+        startFret={clippedFretboardRange.startFret}
+        endFret={clippedFretboardRange.endFret}
         mode={fretboardInstrument === 'bass' ? 'scale' : fretboardMode}
         strings={fretboardInstrument === 'bass' ? BASS_STRINGS : undefined}
         degreeColorMap={chromaColorMap}
         chordTab={guitarChordTabForFretboard}
-        editable={fretboardInstrument === 'guitar'}
+        editable={
+          fretboardInstrument === 'guitar' &&
+          !selectedScale &&
+          mirrorGuitarToPiano
+        }
         onFretClick={
-          fretboardInstrument === 'guitar'
+          fretboardInstrument === 'guitar' && !selectedScale && mirrorGuitarToPiano
             ? isFretboardEditable
               ? handleFretClick
               : handleToggleGuitarFret
             : undefined
         }
-        onFretPeek={fretboardInstrument === 'guitar' ? handleGuitarFretPeek : undefined}
-        showNoteLabels={fretboardInstrument !== 'bass'}
+        onFretPeek={
+          fretboardInstrument === 'guitar' && !selectedScale && mirrorGuitarToPiano
+            ? handleGuitarFretPeek
+            : undefined
+        }
+        showNoteLabels={
+          fretboardInstrument === 'guitar' ? showGuitarFretNoteNames : false
+        }
         pitchClassLabels={fretboardInstrument === 'bass'}
         getFretDotLabel={fretboardInstrument === 'bass' ? bassFretDotLabel : undefined}
         dedupeHighlightGhostToLowest={false}
@@ -1477,7 +2279,7 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
     return (
     <div
       className={`instrument-card ${expanded ? 'expanded-card' : 'fretboard-card'}${
-        fretboardPosMenuOpen ? ' instrument-card--pos-menu-open' : ''
+        collapsedInstruments.has('guitar') ? ' instrument-card--body-collapsed' : ''
       }`}
     >
       <div className="instrument-header instrument-header--fretboard-only">
@@ -1510,85 +2312,41 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
                 Bass
               </button>
             </div>
-            {fretboardInstrument === 'bass' && (
-              <>
-                {fretboardPosCompact ? (
-                  <div className="position-buttons position-buttons--compact">
-                    <div className="pos-nav-menu-wrap" ref={posNavMenuWrapRef}>
-                      <button
-                        type="button"
-                        className={`pos-nav-hamburger pos-nav-hamburger--bass cycle-btn ${fretboardPosMenuOpen ? 'active' : ''}`}
-                        aria-expanded={fretboardPosMenuOpen}
-                        aria-haspopup="menu"
-                        aria-label="Bass positions"
-                        title="Bass positions"
-                        onClick={() => setFretboardPosMenuOpen((o) => !o)}
-                      >
-                        <span className="pos-nav-hamburger-icon" aria-hidden>
-                          ☰
-                        </span>
-                      </button>
-                      {fretboardPosMenuOpen && (
-                        <div className="pos-nav-menu pos-nav-menu--grid" role="menu">
-                          {BASS_POSITIONS.map((pos, idx) => (
-                            <button
-                              key={pos.label}
-                              type="button"
-                              role="menuitem"
-                              className={`pos-nav-menu-item ${bassPosition === idx ? 'active' : ''}`}
-                              onClick={() => {
-                                setBassPosition(idx as 0 | 1 | 2);
-                                setFretboardPosMenuOpen(false);
-                              }}
-                            >
-                              {pos.label}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="position-buttons">
-                    {BASS_POSITIONS.map((pos, idx) => (
-                      <button
-                        key={pos.label}
-                        type="button"
-                        className={`pos-btn ${bassPosition === idx ? 'active' : ''}`}
-                        onClick={() => setBassPosition(idx as 0 | 1 | 2)}
-                      >
-                        {pos.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                <button
-                  type="button"
-                  className={`staff-names-btn ${showBassAllNoteNames ? 'active' : ''}`}
-                  onClick={() => setShowBassAllNoteNames(v => !v)}
-                  title={
-                    showBassAllNoteNames
-                      ? 'Names: chord root + scale/chord tones (pitch class on each dot)'
-                      : 'Names: chord root only on the board'
-                  }
-                >
-                  Names
-                </button>
-              </>
-            )}
             {guitarChordToolsUnlocked &&
               fretboardInstrument === 'guitar' &&
-              isFretboardEditable &&
-              editableGuitarTab != null && (
-              <button
-                className="save-chord-btn"
-                type="button"
-                onClick={handleSaveShape}
-                title={`Save this shape as default for Pos ${guitarPosition + 1}`}
-                style={{ marginLeft: '6px', background: 'var(--bg-lighter)', border: '1px solid var(--border-color)', cursor: 'pointer' }}
-              >
-                Save Default
-              </button>
+              fretboardMode === 'chord' &&
+              selectedChord &&
+              guitarPosition >= 0 && (
+              <>
+                <button
+                  className="save-chord-btn"
+                  type="button"
+                  onClick={handleSaveShape}
+                  title={`Save this shape to the library for Pos ${guitarPosition + 1} (overwrites after confirm)`}
+                  style={{
+                    marginLeft: '6px',
+                    background: 'var(--bg-lighter)',
+                    border: '1px solid var(--border-color)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Save
+                </button>
+                <button
+                  className="save-chord-btn"
+                  type="button"
+                  onClick={handleSaveChartGuitarDefaultPos}
+                  title="When browsing the chart, open this chord at this position until you pick another position"
+                  style={{
+                    marginLeft: '6px',
+                    background: 'var(--bg-lighter)',
+                    border: '1px solid var(--border-color)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Chart default
+                </button>
+              </>
             )}
             {saveStatus && (
               <span
@@ -1609,63 +2367,129 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
             )}
           </div>
           <div className="fretboard-header-trailing">
-            {showGuitarPositions && expanded && guitarPositionNav}
+            {showGuitarPositions &&
+              expanded &&
+              !collapsedInstruments.has('guitar') &&
+              guitarPositionNav}
+            {showBassPositions &&
+              expanded &&
+              !collapsedInstruments.has('guitar') &&
+              bassPositionNav}
             {fretboardInstrument === 'guitar' && (
               <button
                 type="button"
-                className={`expand-btn ${mirrorGuitarToPiano ? 'active' : ''}`}
+                className={`staff-names-btn ${mirrorGuitarToPiano ? 'active' : ''}`}
                 onClick={() => {
                   const next = !mirrorGuitarToPiano;
                   setMirrorGuitarToPiano(next);
-                  if (next) setVoicingType('guitar');
-                  else if (voicingType === 'guitar') setVoicingType('all');
+                  if (next) {
+                    setVoicingType('guitar');
+                    setTappedMidis(new Set());
+                  } else if (voicingType === 'guitar') setVoicingType('all');
                 }}
-                title={mirrorGuitarToPiano ? 'Disconnect from Piano' : 'Mirror notes to Piano'}
-                style={{
-                  color: mirrorGuitarToPiano ? 'var(--accent-primary)' : 'inherit',
-                  background: mirrorGuitarToPiano ? 'var(--accent-primary-dim)' : 'transparent',
-                }}
+                title={
+                  mirrorGuitarToPiano
+                    ? 'Draw on — click the neck to edit; compact piano shows the chord'
+                    : 'Draw off — turn on to edit the neck and sync the compact piano'
+                }
               >
-                🔗
+                Draw
+              </button>
+            )}
+            {fretboardInstrument === 'guitar' && !collapsedInstruments.has('guitar') && (
+              <button
+                type="button"
+                className={`staff-names-btn ${showGuitarFretNoteNames ? 'active' : ''}`}
+                onClick={() => setShowGuitarFretNoteNames((v) => !v)}
+                title={
+                  showGuitarFretNoteNames
+                    ? 'Hide note names on fretboard dots'
+                    : 'Show note names on fretboard dots'
+                }
+              >
+                Names
+              </button>
+            )}
+            {fretboardInstrument === 'bass' && !collapsedInstruments.has('guitar') && (
+              <button
+                type="button"
+                className={`staff-names-btn ${showBassAllNoteNames ? 'active' : ''}`}
+                onClick={() => setShowBassAllNoteNames((v) => !v)}
+                title={
+                  showBassAllNoteNames
+                    ? 'Names: chord root + scale/chord tones (pitch class on each dot)'
+                    : 'Names: chord root only on the board'
+                }
+              >
+                Names
               </button>
             )}
             <button
               type="button"
               className="expand-btn"
-              onClick={() => toggleCollapse('guitar')}
-              title={collapsedInstruments.has('guitar') ? 'Expand guitar panel' : 'Collapse guitar panel'}
+              onClick={() => instrumentPanelHeaderCollapseClick('guitar', expanded)}
+              title={
+                expanded
+                  ? 'Return to default view'
+                  : collapsedInstruments.has('guitar')
+                    ? 'Show panel content'
+                    : 'Collapse panel'
+              }
             >
-              {collapsedInstruments.has('guitar') ? '+' : '−'}
+              {!expanded && collapsedInstruments.has('guitar') ? '+' : '−'}
             </button>
+            {collapsedInstruments.has('guitar') && (
+              <button
+                type="button"
+                className="expand-btn instrument-panel-expand"
+                onClick={() => toggleExpand('guitar')}
+                title={expanded ? 'Return to default view' : 'Expand panel'}
+              >
+                {expanded ? '△' : '▽'}
+              </button>
+            )}
           </div>
         </div>
       </div>
       <div className="instrument-card-body">
       {!collapsedInstruments.has('guitar') && (
         <>
-          {fretboardInstrument === 'guitar' && displayNotes.length > 0 ? (
+          {(fretboardInstrument === 'guitar' || fretboardInstrument === 'bass') &&
+          displayNotes.length > 0 ? (
             <div className="fretboard-with-pos-arrows">
-              {guitarChordToolsUnlocked && fretboardMode === 'chord' && guitarChordFretWindow != null && (
-                <button
-                  type="button"
-                  className="fretboard-pos-arrow fretboard-chord-shift-arrow"
-                  aria-label="Shift neck view toward nut"
-                  title="Shift view toward nut"
-                  disabled={guitarChordFretWindow.startFret === 0}
-                  onClick={() => handleGuitarChordViewShift(-1)}
-                >
-                  «
-                </button>
-              )}
+              {fretboardInstrument === 'guitar' &&
+                guitarChordToolsUnlocked &&
+                fretboardMode === 'chord' &&
+                guitarChordFretWindow != null && (
+                  <button
+                    type="button"
+                    className="fretboard-pos-arrow fretboard-chord-shift-arrow"
+                    aria-label="Shift neck view toward nut"
+                    title="Shift view toward nut"
+                    disabled={guitarChordFretWindow.startFret === 0}
+                    onClick={() => handleGuitarChordViewShift(-1)}
+                  >
+                    «
+                  </button>
+                )}
               <button
                 type="button"
                 className="fretboard-pos-arrow"
                 aria-label="Previous position"
                 title="Previous position"
                 onClick={() => {
-                  const nextIdx = (guitarOptionIdx - 1 + guitarOptionLabels.length) % guitarOptionLabels.length;
-                  setGuitarPosition(guitarOptionLabels[nextIdx].value);
-                  setGuitarVoicingVariant(0);
+                  if (fretboardInstrument === 'guitar') {
+                    const nextIdx =
+                      (guitarOptionIdx - 1 + guitarOptionLabels.length) %
+                      guitarOptionLabels.length;
+                    setGuitarPosition(guitarOptionLabels[nextIdx].value);
+                    setGuitarVoicingVariant(0);
+                  } else {
+                    const nextIdx =
+                      (bassOptionIdx - 1 + bassOptionLabels.length) %
+                      bassOptionLabels.length;
+                    setBassPosition(bassOptionLabels[nextIdx].value);
+                  }
                 }}
               >
                 ◀
@@ -1679,25 +2503,33 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
                 aria-label="Next position"
                 title="Next position"
                 onClick={() => {
-                  const nextIdx = (guitarOptionIdx + 1) % guitarOptionLabels.length;
-                  setGuitarPosition(guitarOptionLabels[nextIdx].value);
-                  setGuitarVoicingVariant(0);
+                  if (fretboardInstrument === 'guitar') {
+                    const nextIdx = (guitarOptionIdx + 1) % guitarOptionLabels.length;
+                    setGuitarPosition(guitarOptionLabels[nextIdx].value);
+                    setGuitarVoicingVariant(0);
+                  } else {
+                    const nextIdx = (bassOptionIdx + 1) % bassOptionLabels.length;
+                    setBassPosition(bassOptionLabels[nextIdx].value);
+                  }
                 }}
               >
                 ▶
               </button>
-              {guitarChordToolsUnlocked && fretboardMode === 'chord' && guitarChordFretWindow != null && (
-                <button
-                  type="button"
-                  className="fretboard-pos-arrow fretboard-chord-shift-arrow"
-                  aria-label="Shift neck view toward body"
-                  title="Shift view toward body"
-                  disabled={guitarChordFretWindow.endFret >= GUITAR_CHORD_MAX_FRET}
-                  onClick={() => handleGuitarChordViewShift(1)}
-                >
-                  »
-                </button>
-              )}
+              {fretboardInstrument === 'guitar' &&
+                guitarChordToolsUnlocked &&
+                fretboardMode === 'chord' &&
+                guitarChordFretWindow != null && (
+                  <button
+                    type="button"
+                    className="fretboard-pos-arrow fretboard-chord-shift-arrow"
+                    aria-label="Shift neck view toward body"
+                    title="Shift view toward body"
+                    disabled={guitarChordFretWindow.endFret >= guitarChordNeckCap}
+                    onClick={() => handleGuitarChordViewShift(1)}
+                  >
+                    »
+                  </button>
+                )}
             </div>
           ) : (
             fretboard
@@ -1726,67 +2558,85 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
                 return '—';
               })()}
             </div>
-          ) : (
-            renderAnalysis()
-          )}
+          ) : null}
         </>
       )}
       </div>
-      <div
-        className={`instrument-card-footer${
-          showGuitarPositions && !expanded ? ' instrument-card-footer--fretboard' : ''
-        }`}
-      >
-        {showGuitarPositions && !expanded && (
-          <div className="guitar-position-footer" ref={guitarPosFooterRef}>
-            <div className="guitar-pos-pills-measure" aria-hidden>
-              <div
-                ref={guitarPillsMeasureRowRef}
-                className="position-buttons guitar-position-buttons"
-              >
-                {guitarOptionLabels.map((opt) => (
-                  <button key={opt.value} type="button" tabIndex={-1} disabled className="pos-btn">
-                    {opt.label === 'All Frets' ? 'All' : opt.label.replace('Pos ', 'P')}
-                  </button>
-                ))}
-              </div>
+      {!collapsedInstruments.has('guitar') && (
+        <div
+          className={`instrument-card-footer${
+            showFretboardPositionFooter ? ' instrument-card-footer--fretboard' : ''
+          }`}
+        >
+          {showFretboardPositionFooter && (
+            <div className="guitar-position-footer" ref={guitarPosFooterRef}>
+              {fretboardInstrument === 'guitar' ? guitarPositionNav : bassPositionNav}
             </div>
-            {guitarPositionNav}
+          )}
+          <div className="instrument-card-footer-actions">
+            <button
+              type="button"
+              className="expand-btn instrument-panel-expand"
+              onClick={() => toggleExpand('guitar')}
+              title={expanded ? 'Return to default view' : 'Expand panel'}
+            >
+              {expanded ? '△' : '▽'}
+            </button>
           </div>
-        )}
-        <div className="instrument-card-footer-actions">
-          <button
-            type="button"
-            className="expand-btn instrument-panel-expand"
-            onClick={() => toggleExpand('guitar')}
-            title={expanded ? 'Collapse panel' : 'Expand panel'}
-          >
-            {expanded ? '△' : '▽'}
-          </button>
         </div>
-      </div>
+      )}
     </div>
     );
   };
 
+  const handleSaveChartGuitarDefaultPos = useCallback(() => {
+    if (!selectedChord || guitarPosition < 0 || !guitarChordToolsUnlocked) return;
+    const sym = canonicalChordSymbol(selectedChord.symbol);
+    setChartGuitarDefaultPos((prev) => {
+      const next = { ...prev, [sym]: guitarPosition };
+      try {
+        localStorage.setItem(CHART_GUITAR_DEFAULT_POS_KEY, JSON.stringify(next));
+      } catch (_) {}
+      return next;
+    });
+    setSaveStatus(`Chart uses Pos ${guitarPosition + 1} for ${sym}`);
+    setTimeout(() => setSaveStatus(null), 3500);
+  }, [selectedChord, guitarPosition, guitarChordToolsUnlocked]);
+
   const handleSaveShape = useCallback(async () => {
-    if (!selectedChord || guitarPosition < 0) return;
-    
-    // Use the actual current editable tab if it exists
-    const tabToSave = (isFretboardEditable && editableGuitarTab) ? editableGuitarTab : guitarChordTab;
+    if (!selectedChord || guitarPosition < 0 || !guitarChordToolsUnlocked) return;
+
+    const tabToSave =
+      isFretboardEditable && editableGuitarTab ? editableGuitarTab : guitarChordTab;
     if (!tabToSave || tabToSave.length !== 6) {
       setSaveStatus('Not saved — no voicing to save (select a chord & position)');
       setTimeout(() => setSaveStatus(null), 4000);
       return;
     }
-    
-    // The database and localStorage expect physical order [low E ... high e]
+
     const tabPhysical = [...tabToSave].reverse();
     const symbol = canonicalChordSymbol(selectedChord.symbol);
     const positionIdx = guitarPosition;
 
-    if (!tabMatchesChordSymbol(tabPhysical, selectedChord.symbol, selectedChord.notes)) {
-      setSaveStatus('Not saved — frets must match chord tones (incl. root), ≥3 strings');
+    const existingRow = customChordsOverride?.[symbol]?.[positionIdx];
+    const hasExisting =
+      existingRow != null &&
+      Array.isArray(existingRow) &&
+      existingRow.some((f) => f != null);
+    if (hasExisting) {
+      if (
+        !window.confirm(`Overwrite saved voicing for ${symbol} at Pos ${positionIdx + 1}?`)
+      ) {
+        return;
+      }
+    }
+
+    if (
+      !tabMatchesChordSymbol(tabPhysical, selectedChord.symbol, selectedChord.notes, {
+        requireRootOnFretboard: false,
+      })
+    ) {
+      setSaveStatus('Not saved — frets must match chord tones, ≥3 strings');
       setTimeout(() => setSaveStatus(null), 4500);
       return;
     }
@@ -1826,7 +2676,15 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
     } catch (e) {
       console.error('Network error during save', e);
     }
-  }, [selectedChord, guitarPosition, guitarChordTab, isFretboardEditable, editableGuitarTab]);
+  }, [
+    selectedChord,
+    guitarPosition,
+    guitarChordTab,
+    isFretboardEditable,
+    editableGuitarTab,
+    guitarChordToolsUnlocked,
+    customChordsOverride,
+  ]);
 
   return (
     <div className="app">
@@ -1854,6 +2712,10 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
               {expandedInstrument !== 'piano' && renderPiano(false)}
               {expandedInstrument !== 'guitar' && renderGuitar(false)}
             </div>
+
+            {expandedInstrument === 'staff' && renderStaff(true)}
+            {expandedInstrument === 'piano' && renderPiano(true)}
+            {expandedInstrument === 'guitar' && renderGuitar(true)}
 
             {showLibrary ? (
               <Library
@@ -1938,7 +2800,16 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
                 }}
               />
             ) : (
-              <ChordChart
+              <>
+                {chartTapHarmonyLine != null || staffLabel ? (
+                  <div
+                    className={`chord-context-above-chart instrument-panel-harmony-label${chartTapHarmonyLine != null ? ' chord-context-above-chart--tap' : ''}`}
+                    aria-live="polite"
+                  >
+                    {chartTapHarmonyLine ?? staffLabel}
+                  </div>
+                ) : null}
+                <ChordChart
                 measures={activeSong.measures}
                 selectedMeasure={selectedMeasure}
                 selectedChordIdx={selectedChordIdx}
@@ -1986,11 +2857,8 @@ function findFirstBarreIndex(tabs: GuitarTab[]): number {
                 swingPercent={swingPercent}
                 onSwingChange={handleSwingChange}
               />
+              </>
             )}
-
-            {expandedInstrument === 'staff' && renderStaff(true)}
-            {expandedInstrument === 'piano' && renderPiano(true)}
-            {expandedInstrument === 'guitar' && renderGuitar(true)}
           </main>
 
           <ScalePanel

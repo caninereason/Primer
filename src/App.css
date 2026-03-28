@@ -16,7 +16,6 @@
   height: 48px;
   padding: 0 14px;
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   z-index: 10;
 }
@@ -157,6 +156,69 @@
   z-index: 1; /* stay above scale strip/sidebar when layouts overlap at odd zoom */
 }
 
+/* Written chord / scale between instruments and chart; tap IDs use the same row */
+.chord-context-above-chart {
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 2px 8px 0;
+  flex-shrink: 0;
+}
+
+.chord-context-above-chart--tap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.chord-tap-harmony-symbols {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  font-size: 12px;
+  text-align: center;
+  word-break: break-word;
+}
+
+.chord-tap-harmony-sep {
+  color: var(--text-dim);
+  font-weight: 400;
+  opacity: 0.65;
+}
+
+.chord-tap-lib {
+  color: var(--accent-secondary);
+}
+
+.chord-tap-theory {
+  color: var(--text-secondary);
+}
+
+.chord-tap-pcs {
+  color: var(--text-dim);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.chord-tap-harmony-clear {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  font-weight: 700;
+  opacity: 0.7;
+}
+
+.chord-tap-harmony-clear:hover {
+  color: var(--accent-primary);
+  opacity: 1;
+}
+
 /* ── Instrument Bar ── */
 
 .instrument-bar {
@@ -167,6 +229,25 @@
   z-index: 4;
 }
 
+/* Same header band height → diagram area starts on one horizontal line across Staff / Piano / Fretboard. */
+.instrument-bar .instrument-card .instrument-header {
+  min-height: 32px;
+  box-sizing: border-box;
+}
+
+.instrument-bar .instrument-card.instrument-card--body-collapsed .instrument-header {
+  min-height: 0;
+}
+
+.instrument-bar .instrument-card > .instrument-card-body {
+  padding-top: 0;
+}
+
+/* Piano keys still read high vs staff/fretboard — extra inset only on this column. */
+.instrument-bar .instrument-card.piano-card > .instrument-card-body {
+  padding-top: 10px;
+}
+
 .instrument-card {
   --instrument-ctl-h: 26px;
   --instrument-ctl-radius: 5px;
@@ -175,7 +256,8 @@
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 8px;
+  /* Minimal gap below top border; keep sides/bottom for touch and separation */
+  padding: 2px 6px 6px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -183,8 +265,39 @@
   isolation: isolate; /* body vs footer z-index stays inside the card */
 }
 
-.instrument-card--pos-menu-open {
-  overflow: visible;
+/* Collapsed (body hidden): keep header toolbar on a single line */
+.instrument-card--body-collapsed .instrument-header {
+  flex-wrap: nowrap;
+}
+
+.instrument-card--body-collapsed .instrument-label {
+  max-width: 36%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instrument-card--body-collapsed .instrument-header-actions {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+/* Collapsed strip: less chrome, lighter edge (instrument bar) */
+.instrument-card.instrument-card--body-collapsed {
+  padding: 1px 4px 3px;
+  border-color: var(--border-light);
+}
+
+.instrument-card.instrument-card--body-collapsed .instrument-header {
+  min-height: 0;
+  margin-bottom: 0;
+  padding-bottom: 1px;
+}
+
+.instrument-bar .instrument-card.instrument-card--body-collapsed {
+  box-shadow: none;
 }
 
 .instrument-card-body {
@@ -201,7 +314,7 @@
   justify-content: flex-end;
   align-items: center;
   margin-top: auto;
-  padding-top: 8px;
+  padding-top: 4px;
   flex-shrink: 0;
   position: relative;
   z-index: 1;
@@ -224,16 +337,6 @@
   min-width: 0;
 }
 
-/* Off-layout clone of pill row — width vs fretboard column drives hamburger */
-.guitar-pos-pills-measure {
-  position: absolute;
-  left: -9999px;
-  top: 0;
-  width: max-content;
-  pointer-events: none;
-  visibility: hidden;
-}
-
 .guitar-position-footer .guitar-position-nav {
   flex: 0 1 auto;
   width: 100%;
@@ -242,8 +345,7 @@
 }
 
 /* Base .guitar-position-buttons uses flex:1 — that fills the row and keeps pills left */
-.guitar-position-footer .guitar-position-nav .guitar-position-buttons,
-.guitar-position-footer .guitar-position-nav .pos-nav-menu-wrap {
+.guitar-position-footer .guitar-position-nav .guitar-position-buttons {
   flex: 0 0 auto;
 }
 
@@ -257,15 +359,6 @@
 .staff-card {
   flex: 2;
   min-width: 260px;
-  padding-top: 0;
-}
-
-.staff-card .instrument-header {
-  margin-bottom: 0;
-}
-
-.staff-card .staff-container {
-  margin-top: -6px;
 }
 
 .piano-card {
@@ -313,7 +406,7 @@
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 16px;
+  padding: 3px 10px 10px;
   overflow: visible; /* don’t clip staff/SVG; main-content already clips overflow-x */
   display: flex;
   flex-direction: column;
@@ -328,15 +421,15 @@
   border: none;
   border-radius: 0;
   padding: 0;
-  min-height: 160px;
+  min-height: 120px;
 }
 
 .expanded-card .piano-container svg {
-  max-height: 180px;
+  max-height: 150px;
 }
 
 .expanded-card .fretboard-container svg {
-  max-height: 280px;
+  max-height: 220px;
 }
 
 /* Expanded: don’t stretch body + pin footer with margin-top:auto (same card uses overflow:hidden).
@@ -347,7 +440,7 @@
 
 .expanded-card.instrument-card .instrument-card-footer {
   margin-top: 0;
-  padding-top: 10px;
+  padding-top: 6px;
 }
 
 .expanded-card .piano-container,
@@ -362,8 +455,8 @@
   align-items: center;
   justify-content: space-between;
   gap: clamp(4px, 1.2cqi, 6px);
-  margin-bottom: 6px;
-  min-height: 20px;
+  margin-bottom: 0;
+  min-height: 18px;
   flex-wrap: nowrap;
   min-width: 0;
   /* Scale all header controls to card width (no scrollbars) */
@@ -408,7 +501,38 @@
   overflow: visible;
 }
 
+.instrument-header-actions > .instrument-panel-expand.expand-btn {
+  width: var(--instrument-ctl-h, 24px);
+  height: var(--instrument-ctl-h, 24px);
+  min-width: var(--instrument-ctl-h, 24px);
+  font-size: 10px;
+  border-radius: var(--instrument-ctl-radius, 4px);
+}
+
 /* Fretboard card: no left title; toolbar starts flush */
+/* Chord/scale caption above chart: .chart-column-harmony + .instrument-panel-harmony-label */
+.instrument-harmony-caption {
+  text-align: center;
+  line-height: 1.25;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.instrument-chord-name,
+.instrument-panel-harmony-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  color: var(--accent-primary);
+}
+
+.instrument-harmony-caption.instrument-panel-harmony-label {
+  font-size: 12px;
+}
+
+.instrument-harmony-caption--footer {
+  padding: 0 6px;
+}
+
 .instrument-header--fretboard-only {
   justify-content: flex-start;
 }
@@ -516,10 +640,7 @@
 }
 
 .instrument-chord-name {
-  font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
-  font-weight: 600;
-  color: var(--accent-primary);
   flex-shrink: 0;
   white-space: nowrap;
   overflow: hidden;
@@ -549,14 +670,22 @@
 }
 
 .staff-names-btn {
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 4px;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0 10px;
+  border-radius: var(--instrument-ctl-radius, 4px);
   border: 1px solid var(--border);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
   transition: all var(--transition);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
 }
 
 .staff-names-btn:hover {
@@ -661,107 +790,6 @@
   justify-content: center;
 }
 
-/* Collapsed position pills (overflow): hamburger + flyout menu */
-.pos-nav-menu-wrap {
-  position: relative;
-  flex-shrink: 0;
-}
-
-.pos-nav-hamburger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-}
-
-.pos-nav-hamburger.active {
-  border-color: var(--accent-primary);
-  color: var(--accent-primary);
-}
-
-.pos-nav-hamburger-icon {
-  font-size: 14px;
-  font-weight: 700;
-  transform: translateY(-1px);
-}
-
-.instrument-card .instrument-header .pos-nav-hamburger--bass {
-  box-sizing: border-box;
-  width: var(--instrument-ctl-h);
-  height: var(--instrument-ctl-h);
-  min-width: var(--instrument-ctl-h);
-  border-radius: var(--instrument-ctl-radius);
-  font-size: clamp(7px, 2cqi, 10px);
-}
-
-.position-buttons--compact {
-  flex: 0 0 auto;
-}
-
-.pos-nav-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 60;
-  box-sizing: border-box;
-  min-width: 4.75rem;
-  max-width: 11rem;
-  max-height: min(36vh, 200px);
-  padding: 3px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-md);
-}
-
-.pos-nav-menu--grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 2px;
-  min-width: 6.25rem;
-  max-width: 11rem;
-}
-
-.pos-nav-menu--grid .pos-nav-menu-item {
-  text-align: center;
-  padding: 4px 4px;
-  font-size: 10px;
-}
-
-.pos-nav-menu-item {
-  box-sizing: border-box;
-  width: 100%;
-  padding: 5px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  font-family: inherit;
-  line-height: 1.2;
-  text-align: left;
-  cursor: pointer;
-  transition: border-color var(--transition), background var(--transition), color var(--transition);
-}
-
-.pos-nav-menu-item:hover {
-  border-color: var(--accent-primary);
-  color: var(--text-primary);
-  background: var(--bg-hover);
-}
-
-.pos-nav-menu-item.active {
-  background: var(--accent-primary-dim);
-  border-color: var(--accent-primary);
-  color: var(--accent-primary);
-}
-
 .pos-btn {
   box-sizing: border-box;
   height: var(--instrument-ctl-h);
@@ -861,14 +889,13 @@
   font-size: clamp(9px, 2.6cqi, 12px);
 }
 
+/* Same control geometry on staff, piano, and fretboard diagram headers (not cqi — avoids wide piano vs narrow staff mismatch) */
 .instrument-card .instrument-header .staff-names-btn {
-  box-sizing: border-box;
   height: var(--instrument-ctl-h);
-  display: inline-flex;
-  align-items: center;
-  padding: 0 clamp(4px, 1.7cqi, 10px);
+  min-width: 3.25rem;
+  padding: 0 10px;
   border-radius: var(--instrument-ctl-radius);
-  font-size: clamp(8px, 2.4cqi, 12px);
+  font-size: 10px;
   font-weight: 600;
 }
 
@@ -903,7 +930,120 @@
 
 .instrument-card .staff-label {
   font-size: 12px;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
+}
+
+.staff-host {
+  position: relative;
+  display: block;
+}
+
+.staff-host--interactive {
+  cursor: crosshair;
+}
+
+.staff-host--interactive .staff-render {
+  cursor: crosshair;
+}
+
+/* Hover / selected pitch label (matches Vex name column, accent highlight) */
+.staff-name-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 28px;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.staff-name-rail-label {
+  position: absolute;
+  left: 2px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  transform: translateY(-50%);
+  font-family: Inter, sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-primary);
+  border: 1px solid color-mix(in srgb, var(--accent-primary) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent-primary) 22%, var(--bg-elevated));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-primary) 20%, transparent);
+}
+
+.staff-name-rail-label--sticky {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-primary) 28%, var(--bg-elevated));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-primary) 40%, transparent);
+}
+
+/* Scratch tools: N × / E ♯ / S ♮ / W ♭ around notehead center */
+.staff-nesw-wrap {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.staff-nesw-btn {
+  position: absolute;
+  pointer-events: auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  margin: 0;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Bravura Text', 'Segoe UI Symbol', serif;
+}
+
+.staff-nesw-btn:hover {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.staff-nesw-btn--active {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-primary) 18%, var(--bg-elevated));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-primary) 35%, transparent);
+}
+
+.staff-nesw-n {
+  left: 50%;
+  bottom: 100%;
+  transform: translate(-50%, -8px);
+}
+
+.staff-nesw-e {
+  left: 100%;
+  top: 50%;
+  transform: translate(8px, -50%);
+}
+
+.staff-nesw-s {
+  left: 50%;
+  top: 100%;
+  transform: translate(-50%, 8px);
+}
+
+.staff-nesw-w {
+  left: 0;
+  top: 50%;
+  transform: translate(calc(-100% - 8px), -50%);
 }
 
 /* Piano */
@@ -916,12 +1056,17 @@
   gap: 4px;
 }
 
+/* In the instrument bar, don’t let the piano column grow a tall flex slot (keeps keys with staff/fretboard). */
+.instrument-card:not(.expanded-card) .piano-container {
+  flex: 0 0 auto;
+}
+
 .piano-container svg {
   width: 100%;
   max-width: 100%;
   min-width: 0;
   height: auto;
-  max-height: 90px;
+  max-height: 76px;
 }
 
 .voicing-legend {
@@ -952,7 +1097,7 @@
   max-width: 100%;
   min-width: 0;
   height: auto;
-  max-height: 108px;
+  max-height: 92px;
 }
 
 /* Guitar position ◀ ▶ beside fretboard (arrows removed from header) */
@@ -1061,12 +1206,26 @@
 /* ── Chord Chart ── */
 
 .chord-chart {
+  --instrument-ctl-h: clamp(18px, 5cqi + 10px, 26px);
+  --instrument-ctl-radius: clamp(3px, 0.85cqi, 5px);
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 14px;
   position: relative;
   z-index: 4;
+  min-height: 168px;
+  container-type: inline-size;
+  container-name: chart;
+}
+
+.chord-chart--minimized {
+  min-height: 0;
+  padding: 10px 12px 10px;
+}
+
+.chord-chart--minimized .chart-header {
+  margin-bottom: 6px;
 }
 
 .chart-header {
@@ -1078,6 +1237,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .fn-toggle {
@@ -1109,6 +1270,21 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+/* Same geometry as .instrument-card .instrument-header .expand-btn (− / +) */
+.chart-header-actions > .expand-btn.chart-grid-collapse-btn {
+  box-sizing: border-box;
+  width: var(--instrument-ctl-h);
+  height: var(--instrument-ctl-h);
+  min-width: var(--instrument-ctl-h);
+  border-radius: var(--instrument-ctl-radius);
+  font-size: clamp(9px, 2.6cqi, 12px);
+  flex-shrink: 0;
 }
 
 .scales-on-play-btn {
@@ -1248,6 +1424,10 @@
   font-weight: 700;
   color: var(--text-primary);
   margin-bottom: 2px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chart-meta {
@@ -1256,6 +1436,10 @@
   gap: 6px;
   font-size: 12px;
   color: var(--text-secondary);
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .key-select-wrap {
@@ -1391,6 +1575,7 @@
   border: 1px solid var(--border-light);
   border-radius: var(--radius-sm);
   overflow: hidden;
+  min-height: 56px;
 }
 
 .chart-row {
